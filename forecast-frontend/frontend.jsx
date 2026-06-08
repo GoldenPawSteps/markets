@@ -1,0 +1,1066 @@
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import {
+  TrendingUp, Search, Plus, Wallet, Trophy, LogIn, LogOut, X, Check, Loader2,
+  MessageSquare, Clock, CheckCircle2, Coins, Activity, ChevronRight, Send,
+  AlertCircle, Wifi, WifiOff, Sparkles, BarChart3, Users, ArrowUpRight, ArrowDownRight,
+} from 'lucide-react';
+import {
+  LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
+} from 'recharts';
+import { motion, AnimatePresence } from 'framer-motion';
+
+/* ============================ Config ============================ */
+// Point these at your FastAPI server. The Vite (5173) / CRA (3000) origins are
+// already in the backend CORS allow-list.
+const API_BASE = (typeof window !== 'undefined' && window.__FORECAST_API__) || 'http://localhost:8000';
+const WS_BASE  = (typeof window !== 'undefined' && window.__FORECAST_WS__)  || 'ws://localhost:8000/ws';
+
+const CATEGORIES = ['Crypto', 'Economics', 'Sports', 'Tech', 'Weather', 'Climate', 'Politics', 'Other'];
+const LINE_COLORS = ['#6366f1', '#10b981', '#f59e0b', '#ef4444', '#06b6d4', '#a855f7'];
+
+/* ============================ Format helpers ============================ */
+const nf = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 });
+const money = (x) => (x < 0 ? '−' : '') + nf.format(Math.abs(Number(x) || 0));
+const pct = (x) => `${(x * 100).toFixed(0)}%`;
+const pct1 = (x) => `${(x * 100).toFixed(1)}%`;
+const fmtDay = (iso) => new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+function fromNow(iso) {
+  const diff = new Date(iso).getTime() - Date.now();
+  const past = diff < 0; const s = Math.abs(diff) / 1000;
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+  const str = d > 0 ? `${d}d` : h > 0 ? `${h}h` : `${m}m`;
+  return past ? `${str} ago` : `in ${str}`;
+}
+function hashColor(str) {
+  let h = 0; for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) >>> 0;
+  return LINE_COLORS[h % LINE_COLORS.length];
+}
+const tradeUser = (t) => t.user || { name: t.user_name || 'Bot', avatar: (t.user_name || 'B').slice(0, 2).toUpperCase(), color: hashColor(t.user_name || 'Bot') };
+
+/* ============================ LMSR (ported from the backend) ============================ */
+function lmsrPrices(shares, b) {
+  const m = Math.max(...shares);
+  const ex = shares.map((q) => Math.exp((q - m) / b));
+  const s = ex.reduce((a, c) => a + c, 0);
+  return ex.map((e) => e / s);
+}
+function lmsrCost(shares, b) {
+  const m = Math.max(...shares);
+  const s = shares.reduce((a, q) => a + Math.exp((q - m) / b), 0);
+  return m + b * Math.log(s);
+}
+function costToTrade(shares, b, idx, delta) {
+  const after = shares.slice(); after[idx] += delta;
+  return lmsrCost(after, b) - lmsrCost(shares, b);
+}
+function maxAffordable(shares, b, idx, budget) {
+  if (budget <= 0) return 0;
+  let hi = 1; while (costToTrade(shares, b, idx, hi) < budget && hi < 5e6) hi *= 2;
+  let lo = 0;
+  for (let i = 0; i < 50; i++) { const mid = (lo + hi) / 2; if (costToTrade(shares, b, idx, mid) <= budget) lo = mid; else hi = mid; }
+  return Math.floor(lo);
+}
+function localQuote(market, outcomeId, side, qty, balance, held) {
+  const shares = market.outcomes.map((o) => o.shares_outstanding);
+  const b = market.liquidity_param;
+  const idx = market.outcomes.findIndex((o) => o.id === outcomeId);
+  const cur = lmsrPrices(shares, b)[idx];
+  if (!qty || qty <= 0) return { shares: 0, side, cur_price: cur, error: 'Enter a quantity' };
+  const delta = side === 'buy' ? qty : -qty;
+  const cost = costToTrade(shares, b, idx, delta);
+  const after = shares.slice(); after[idx] += delta;
+  const newPrice = lmsrPrices(after, b)[idx];
+  const abscost = Math.abs(cost);
+  let error = null;
+  if (side === 'buy' && cost > (balance ?? Infinity) + 1e-9) error = 'Insufficient balance';
+  if (side === 'sell' && qty > (held ?? 0) + 1e-9) error = 'Not enough shares';
+  return {
+    shares: qty, side, cur_price: cur, new_price: newPrice, avg_price: abscost / qty,
+    cost: abscost, proceeds: side === 'sell' ? -cost : 0,
+    max_payout: side === 'buy' ? qty : null, max_profit: side === 'buy' ? qty - abscost : null,
+    outcome_id: outcomeId, outcome_label: market.outcomes[idx].label, error,
+  };
+}
+
+/* ============================ HTTP client ============================ */
+const qs = (o) => Object.entries(o).filter(([, v]) => v !== undefined && v !== null && v !== '')
+  .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
+
+async function http(path, { method = 'GET', body, headers = {}, timeout = 8000 } = {}) {
+  const ctrl = new AbortController();
+  const id = setTimeout(() => ctrl.abort(), timeout);
+  try {
+    const res = await fetch(API_BASE + path, {
+      method,
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: ctrl.signal,
+    });
+    const text = await res.text();
+    const data = text ? JSON.parse(text) : null;
+    if (!res.ok) throw new Error((data && (data.detail || data.message)) || `HTTP ${res.status}`);
+    return data;
+  } finally { clearTimeout(id); }
+}
+async function loginHttp(username, password) {
+  const res = await fetch(API_BASE + '/auth/login', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ username, password }),
+  });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error((data && data.detail) || 'Login failed');
+  return data;
+}
+
+/* ============================ Demo data + engine ============================ */
+let _id = 0; const makeId = () => `d${(++_id).toString(36)}${Date.now().toString(36).slice(-3)}`;
+const NOW = Date.now(); const DAY = 86400000;
+
+function genHistory(endPrices, startMs, endMs, n = 30) {
+  const u = 1 / endPrices.length; const pts = [];
+  for (let k = 0; k <= n; k++) {
+    const f = k / n; const ease = f * f * (3 - 2 * f);
+    let row = endPrices.map((p) => Math.max(0.01, u + (p - u) * ease + (Math.random() - 0.5) * 0.02 * (1 - ease)));
+    const s = row.reduce((a, c) => a + c, 0); row = row.map((x) => x / s);
+    pts.push({ t: new Date(startMs + (endMs - startMs) * f).toISOString(), values: row });
+  }
+  return pts;
+}
+
+function buildDemo() {
+  const users = {};
+  const add = (name, avatar, color, bal, admin = false, bot = true) => {
+    const u = { id: makeId(), name, avatar, color, balance: bal, start_balance: bal, realized_pnl: 0, is_admin: admin, is_bot: bot };
+    users[u.id] = u; return u;
+  };
+  const you = add('You', 'YO', '#4f46e5', 1000, true, false);
+  const bots = [
+    add('QuantWhale', 'QW', '#0891b2', 2200), add('MarketMaven', 'MM', '#7c3aed', 1500),
+    add('HedgeHog', 'HH', '#d97706', 900), add('OddsOracle', 'OO', '#16a34a', 1800),
+    add('PaperHands', 'PH', '#e11d48', 650), add('DiamondMind', 'DM', '#4f46e5', 1300),
+  ];
+  const specs = [
+    ['Will it rain in New York City tomorrow?', 'Measurable precipitation in Central Park during the calendar day.', 'binary', 'Weather', 140, ['Yes', 'No'], 1, 14, [0.36, 0.64], null],
+    ['Will Bitcoin close above $100,000 this year?', 'Settles on the daily close of a major spot index.', 'binary', 'Crypto', 170, ['Yes', 'No'], 120, 40, [0.58, 0.42], null],
+    ['Will the Fed cut rates at the next meeting?', 'Based on the official FOMC target-range decision.', 'binary', 'Economics', 150, ['Yes', 'No'], 22, 18, [0.70, 0.30], null],
+    ['Who will win the next World Cup?', 'A categorical market across leading national teams.', 'categorical', 'Sports', 260, ['Brazil', 'Argentina', 'France', 'Spain', 'Field'], 200, 30, [0.24, 0.21, 0.19, 0.16, 0.20], null],
+    ['Did the spring event reveal a foldable phone?', 'A market that has reached its close date and awaits resolution.', 'binary', 'Tech', 150, ['Yes', 'No'], -3, 20, [0.42, 0.58], null],
+    ['Did the home team win Game 7?', 'A resolved example market showing payouts.', 'binary', 'Sports', 130, ['Yes', 'No'], -9, 22, [0.62, 0.38], 'Yes'],
+  ];
+  const markets = specs.map(([q, desc, type, cat, b, labels, closeDays, ago, target, win]) => {
+    const outcomes = labels.map((label, i) => ({ id: makeId(), label, position: i, shares_outstanding: b * Math.log(target[i]) }));
+    const createdMs = NOW - ago * DAY; const closeMs = NOW + closeDays * DAY;
+    const m = {
+      id: makeId(), question: q, description: desc, category: cat, type, liquidity_param: b,
+      resolution_criteria: 'Resolves per the stated criteria using the official source at close.',
+      created_by: bots[0].id, created_at: new Date(createdMs).toISOString(),
+      close_date: new Date(closeMs).toISOString(), volume: 200 + Math.random() * 4000,
+      status: win ? 'resolved' : 'open', resolved_outcome_id: null, outcomes,
+      history: genHistory(target, createdMs, Math.min(NOW, closeMs)), recent_trades: [], comments: [],
+    };
+    for (let i = 0; i < 4; i++) {
+      const oc = outcomes[Math.floor(Math.random() * outcomes.length)]; const bot = bots[Math.floor(Math.random() * bots.length)];
+      m.recent_trades.unshift({ id: makeId(), side: Math.random() > 0.4 ? 'buy' : 'sell', shares: 1 + Math.floor(Math.random() * 6), price: target[outcomes.indexOf(oc)], outcome_id: oc.id, outcome_label: oc.label, created_at: new Date(NOW - Math.random() * 5 * DAY).toISOString(), user_name: bot.name });
+    }
+    if (win) { const w = outcomes.find((o) => o.label === win); m.resolved_outcome_id = w.id; m.history.push({ t: m.close_date, values: outcomes.map((o) => (o.id === w.id ? 1 : 0)) }); }
+    return m;
+  });
+  markets[1].comments = [{ id: makeId(), text: 'ETF flows look strong — leaning yes here.', created_at: new Date(NOW - 6 * 3600000).toISOString(), user: { name: 'QuantWhale', avatar: 'QW', color: '#0891b2' } }];
+  const positions = [];
+  const buy = (mq, label, qty) => {
+    const m = markets.find((x) => x.question === mq); const oc = m.outcomes.find((o) => o.label === label);
+    positions.push({ id: makeId(), user_id: you.id, market_id: m.id, outcome_id: oc.id, shares: qty, avg_price: lmsrPrices(m.outcomes.map((o) => o.shares_outstanding), m.liquidity_param)[m.outcomes.indexOf(oc)] });
+  };
+  buy('Will the Fed cut rates at the next meeting?', 'Yes', 80);
+  buy('Will Bitcoin close above $100,000 this year?', 'Yes', 60);
+  buy('Who will win the next World Cup?', 'Brazil', 50);
+  return { users, you, bots, markets, positions, trades: [] };
+}
+const demoState = buildDemo();
+const demoEmitter = {
+  handlers: new Set(),
+  emit(e) { this.handlers.forEach((h) => { try { h(e); } catch { /* ignore */ } }); },
+  on(h) { this.handlers.add(h); return () => this.handlers.delete(h); },
+};
+
+const statusOf = (m) => (m.resolved_outcome_id ? 'resolved' : new Date(m.close_date).getTime() <= Date.now() ? 'closed' : 'open');
+function marketOut(m, detail = false) {
+  const prices = lmsrPrices(m.outcomes.map((o) => o.shares_outstanding), m.liquidity_param);
+  const base = {
+    id: m.id, question: m.question, description: m.description, category: m.category, type: m.type,
+    status: statusOf(m), close_date: m.close_date, created_at: m.created_at, volume: m.volume,
+    liquidity_param: m.liquidity_param, created_by: m.created_by, resolved_outcome_id: m.resolved_outcome_id,
+    outcomes: m.outcomes.map((o, i) => ({ id: o.id, label: o.label, position: o.position, price: prices[i], shares_outstanding: o.shares_outstanding })),
+  };
+  if (!detail) return base;
+  return { ...base, resolution_criteria: m.resolution_criteria, creator: { id: m.created_by, name: (demoState.users[m.created_by] || {}).name }, history: m.history.slice(-200), recent_trades: m.recent_trades.slice(0, 20), comments: m.comments.slice() };
+}
+function demoTrade(userId, marketId, outcomeId, side, qty) {
+  const m = demoState.markets.find((x) => x.id === marketId);
+  if (!m) throw new Error('Market not found');
+  if (statusOf(m) !== 'open') throw new Error('Market is not open');
+  const u = demoState.users[userId];
+  const shares = m.outcomes.map((o) => o.shares_outstanding);
+  const b = m.liquidity_param; const idx = m.outcomes.findIndex((o) => o.id === outcomeId);
+  let pos = demoState.positions.find((p) => p.user_id === userId && p.outcome_id === outcomeId);
+  const held = pos ? pos.shares : 0;
+  const delta = side === 'buy' ? qty : -qty;
+  const cost = costToTrade(shares, b, idx, delta);
+  if (side === 'buy' && cost > u.balance + 1e-9) throw new Error('Insufficient balance');
+  if (side === 'sell' && qty > held + 1e-9) throw new Error('Not enough shares to sell');
+  m.outcomes[idx].shares_outstanding += delta;
+  const perShare = Math.abs(cost) / qty;
+  if (side === 'buy') {
+    const ns = held + qty; const basis = pos ? pos.shares * pos.avg_price : 0;
+    if (pos) { pos.shares = ns; pos.avg_price = (basis + cost) / ns; }
+    else { pos = { id: makeId(), user_id: userId, market_id: marketId, outcome_id: outcomeId, shares: ns, avg_price: cost / ns }; demoState.positions.push(pos); }
+  } else {
+    u.realized_pnl += (-cost) - qty * (pos ? pos.avg_price : 0);
+    if (held - qty <= 1e-9) { demoState.positions = demoState.positions.filter((p) => p !== pos); pos = null; }
+    else pos.shares = held - qty;
+  }
+  u.balance -= cost; m.volume += Math.abs(cost);
+  const prices = lmsrPrices(m.outcomes.map((o) => o.shares_outstanding), b);
+  const created_at = new Date().toISOString();
+  const tr = { id: makeId(), user_id: userId, user_name: u.name, market_id: marketId, outcome_id: outcomeId, outcome_label: m.outcomes[idx].label, side, shares: qty, price: perShare, cost: Math.abs(cost), created_at };
+  m.recent_trades.unshift(tr); m.recent_trades = m.recent_trades.slice(0, 30);
+  demoState.trades.unshift({ ...tr, question: m.question });
+  m.history.push({ t: created_at, values: prices });
+  const pricesPayload = m.outcomes.map((o, i) => ({ outcome_id: o.id, label: o.label, price: prices[i], shares_outstanding: o.shares_outstanding }));
+  demoEmitter.emit({ type: 'market_update', market_id: marketId, prices: pricesPayload, volume: m.volume, trade: tr });
+  return { trade: tr, prices: pricesPayload, balance: u.balance, realized_pnl: u.realized_pnl, market_volume: m.volume, position: pos ? { outcome_id: outcomeId, shares: pos.shares, avg_price: pos.avg_price } : null };
+}
+function demoResolve(marketId, winId) {
+  const m = demoState.markets.find((x) => x.id === marketId); if (!m) throw new Error('Market not found');
+  demoState.positions.filter((p) => p.market_id === marketId).forEach((p) => {
+    const u = demoState.users[p.user_id]; const payout = p.outcome_id === winId ? p.shares : 0;
+    u.balance += payout; u.realized_pnl += payout - p.shares * p.avg_price;
+  });
+  demoState.positions = demoState.positions.filter((p) => p.market_id !== marketId);
+  m.status = 'resolved'; m.resolved_outcome_id = winId;
+  const final = m.outcomes.map((o) => (o.id === winId ? 1 : 0));
+  m.history.push({ t: new Date().toISOString(), values: final });
+  const payload = { type: 'market_resolved', market_id: marketId, status: 'resolved', resolved_outcome_id: winId, prices: m.outcomes.map((o, i) => ({ outcome_id: o.id, label: o.label, price: final[i] })) };
+  demoEmitter.emit(payload);
+  return payload;
+}
+let demoBotsStarted = false;
+function startDemoBots() {
+  if (demoBotsStarted) return; demoBotsStarted = true;
+  setInterval(() => {
+    const open = demoState.markets.filter((m) => statusOf(m) === 'open');
+    if (!open.length) return;
+    const m = open[Math.floor(Math.random() * open.length)];
+    const oc = m.outcomes[Math.floor(Math.random() * m.outcomes.length)];
+    const bot = demoState.bots[Math.floor(Math.random() * demoState.bots.length)];
+    try { demoTrade(bot.id, m.id, oc.id, 'buy', 1 + Math.floor(Math.random() * 4)); } catch { /* ignore */ }
+  }, 2800);
+}
+
+/* ============================ Data sources ============================ */
+function makeLiveDS(token) {
+  const auth = token ? { Authorization: `Bearer ${token}` } : {};
+  return {
+    mode: 'live',
+    listMarkets: (p) => http(`/markets?${qs(p)}`),
+    getMarket: (id) => http(`/markets/${id}`),
+    quote: async ({ market, outcome_id, side, shares, balance, held }) => {
+      if (token) { try { return await http(`/markets/${market.id}/quote?${qs({ outcome_id, side, shares })}`, { headers: auth }); } catch { /* fall back */ } }
+      return localQuote(market, outcome_id, side, shares, balance, held);
+    },
+    trade: (b) => http('/trades', { method: 'POST', body: b, headers: auth }),
+    resolve: (id, winning_outcome_id) => http(`/markets/${id}/resolve`, { method: 'POST', body: { winning_outcome_id }, headers: auth }),
+    addComment: (id, text) => http(`/markets/${id}/comments`, { method: 'POST', body: { text }, headers: auth }),
+    portfolio: () => http('/me/portfolio', { headers: auth }),
+    myTrades: () => http('/me/trades', { headers: auth }),
+    leaderboard: () => http('/leaderboard'),
+    createMarket: (b) => http('/markets', { method: 'POST', body: b, headers: auth }),
+    me: () => http('/auth/me', { headers: auth }),
+  };
+}
+function makeDemoDS(userId) {
+  const filt = (p) => {
+    let list = demoState.markets.map((m) => marketOut(m));
+    if (p.status) list = list.filter((m) => m.status === p.status);
+    if (p.category && p.category !== 'All') list = list.filter((m) => m.category === p.category);
+    if (p.q) { const q = p.q.toLowerCase(); list = list.filter((m) => m.question.toLowerCase().includes(q) || m.description.toLowerCase().includes(q)); }
+    list.sort((a, b) => (p.sort === 'newest' ? new Date(b.created_at) - new Date(a.created_at) : b.volume - a.volume));
+    return list;
+  };
+  return {
+    mode: 'demo',
+    listMarkets: async (p) => filt(p),
+    getMarket: async (id) => { const m = demoState.markets.find((x) => x.id === id); if (!m) throw new Error('Market not found'); return marketOut(m, true); },
+    quote: async ({ market, outcome_id, side, shares, balance, held }) => localQuote(market, outcome_id, side, shares, balance, held),
+    trade: async (b) => demoTrade(userId, b.market_id, b.outcome_id, b.side, b.shares),
+    resolve: async (id, win) => demoResolve(id, win),
+    addComment: async (id, text) => {
+      const m = demoState.markets.find((x) => x.id === id); const u = demoState.users[userId];
+      const c = { id: makeId(), text, created_at: new Date().toISOString(), user: { name: u.name, avatar: u.avatar, color: u.color } };
+      m.comments.unshift(c); demoEmitter.emit({ type: 'comment', market_id: id, ...c }); return c;
+    },
+    portfolio: async () => {
+      const u = demoState.users[userId]; const rows = []; let pv = 0, unreal = 0;
+      demoState.positions.filter((p) => p.user_id === userId).forEach((p) => {
+        const m = demoState.markets.find((x) => x.id === p.market_id); if (!m) return;
+        const prices = lmsrPrices(m.outcomes.map((o) => o.shares_outstanding), m.liquidity_param);
+        const i = m.outcomes.findIndex((o) => o.id === p.outcome_id); const cur = prices[i]; const value = p.shares * cur;
+        pv += value; unreal += value - p.shares * p.avg_price;
+        rows.push({ market_id: m.id, question: m.question, outcome_id: p.outcome_id, outcome_label: m.outcomes[i].label, shares: p.shares, avg_price: p.avg_price, cur_price: cur, value, unrealized_pnl: value - p.shares * p.avg_price });
+      });
+      return { net_worth: u.balance + pv, cash: u.balance, positions_value: pv, unrealized_pnl: unreal, realized_pnl: u.realized_pnl, positions: rows };
+    },
+    myTrades: async () => demoState.trades.filter((t) => t.user_id === userId).slice(0, 50),
+    leaderboard: async () => {
+      const hold = {};
+      demoState.positions.forEach((p) => {
+        const m = demoState.markets.find((x) => x.id === p.market_id); if (!m) return;
+        const prices = lmsrPrices(m.outcomes.map((o) => o.shares_outstanding), m.liquidity_param);
+        const i = m.outcomes.findIndex((o) => o.id === p.outcome_id); hold[p.user_id] = (hold[p.user_id] || 0) + p.shares * prices[i];
+      });
+      return Object.values(demoState.users).map((u) => { const net = u.balance + (hold[u.id] || 0); return { id: u.id, name: u.name, avatar: u.avatar, color: u.color, net_worth: net, profit: net - u.start_balance, is_bot: u.is_bot }; }).sort((a, b) => b.net_worth - a.net_worth);
+    },
+    createMarket: async (b) => {
+      const labels = b.type === 'binary' ? ['Yes', 'No'] : b.outcomes.filter((x) => x.trim());
+      const outcomes = labels.map((label, i) => ({ id: makeId(), label, position: i, shares_outstanding: 0 }));
+      const m = { id: makeId(), question: b.question, description: b.description || '', category: b.category, type: b.type, liquidity_param: b.liquidity_param, resolution_criteria: b.resolution_criteria || '', created_by: userId, created_at: new Date().toISOString(), close_date: b.close_date, volume: 0, status: 'open', resolved_outcome_id: null, outcomes, history: [{ t: new Date().toISOString(), values: labels.map(() => 1 / labels.length) }], recent_trades: [], comments: [] };
+      demoState.markets.unshift(m); const out = marketOut(m, true); demoEmitter.emit({ type: 'market_created', market: marketOut(m) }); return out;
+    },
+    me: async () => demoState.users[userId],
+  };
+}
+
+/* ============================ Realtime hook ============================ */
+function useRealtime(mode, handlerRef) {
+  const wsRef = useRef(null); const topics = useRef(new Set(['feed'])); const [status, setStatus] = useState('idle');
+  useEffect(() => {
+    if (mode === 'demo') { setStatus('demo'); startDemoBots(); return demoEmitter.on((e) => handlerRef.current && handlerRef.current(e)); }
+    if (mode !== 'live') return undefined;
+    let closed = false; let retry;
+    const connect = () => {
+      try {
+        const ws = new WebSocket(WS_BASE); wsRef.current = ws;
+        ws.onopen = () => { setStatus('open'); topics.current.forEach((t) => ws.send(JSON.stringify({ action: 'subscribe', topic: t }))); };
+        ws.onmessage = (ev) => { try { const m = JSON.parse(ev.data); if (m.type !== 'pong') handlerRef.current && handlerRef.current(m); } catch { /* ignore */ } };
+        ws.onclose = () => { setStatus('closed'); if (!closed) retry = setTimeout(connect, 2500); };
+        ws.onerror = () => { try { ws.close(); } catch { /* ignore */ } };
+      } catch { setStatus('closed'); }
+    };
+    connect();
+    return () => { closed = true; clearTimeout(retry); try { wsRef.current && wsRef.current.close(); } catch { /* ignore */ } };
+  }, [mode, handlerRef]);
+  const subscribe = useCallback((t) => { topics.current.add(t); const ws = wsRef.current; if (ws && ws.readyState === 1) ws.send(JSON.stringify({ action: 'subscribe', topic: t })); }, []);
+  const unsubscribe = useCallback((t) => { topics.current.delete(t); const ws = wsRef.current; if (ws && ws.readyState === 1) ws.send(JSON.stringify({ action: 'unsubscribe', topic: t })); }, []);
+  return { status, subscribe, unsubscribe };
+}
+
+/* ============================ Small UI atoms ============================ */
+const Spinner = ({ className = 'w-5 h-5' }) => <Loader2 className={`animate-spin ${className}`} />;
+function Badge({ status }) {
+  const map = { open: 'bg-emerald-100 text-emerald-700', closed: 'bg-amber-100 text-amber-700', resolved: 'bg-slate-200 text-slate-600' };
+  const label = { open: 'Open', closed: 'Closed', resolved: 'Resolved' }[status];
+  return <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${map[status]}`}>{label}</span>;
+}
+function Avatar({ user, size = 'w-8 h-8' }) {
+  if (!user) return null;
+  return <div className={`${size} rounded-full flex items-center justify-center text-white text-xs font-bold shrink-0`} style={{ background: user.color }}>{user.avatar}</div>;
+}
+function Money({ value, className = '' }) {
+  return <span className={`inline-flex items-center gap-1 ${className}`}><Coins className="w-3.5 h-3.5 text-amber-500" />{money(value)}</span>;
+}
+function Modal({ open, onClose, children, title }) {
+  return (
+    <AnimatePresence>
+      {open && (
+        <motion.div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={onClose}>
+          <motion.div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden" initial={{ scale: 0.95, y: 10 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.95, y: 10 }} onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+              <h3 className="font-bold text-slate-800">{title}</h3>
+              <button onClick={onClose} className="text-slate-400 hover:text-slate-600"><X className="w-5 h-5" /></button>
+            </div>
+            <div className="p-5">{children}</div>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+}
+
+/* ============================ Chart ============================ */
+function PriceChart({ market, history }) {
+  const colorFor = (label) => {
+    if (market.type === 'binary') return label === 'Yes' ? '#10b981' : '#ef4444';
+    return LINE_COLORS[market.outcomes.findIndex((o) => o.label === label) % LINE_COLORS.length];
+  };
+  const keys = market.type === 'binary'
+    ? [(market.outcomes.find((o) => o.label === 'Yes') || market.outcomes[0]).label]
+    : [...market.outcomes].sort((a, b) => b.price - a.price).slice(0, 4).map((o) => o.label);
+  const data = (history || []).map((h) => {
+    const row = { t: h.t }; market.outcomes.forEach((o, i) => { row[o.label] = +(h.values[i] * 100).toFixed(1); }); return row;
+  });
+  if (!data.length) return <div className="h-72 flex items-center justify-center text-slate-400 text-sm">No price history yet</div>;
+  return (
+    <div className="h-72 w-full">
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: -16 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+          <XAxis dataKey="t" tickFormatter={fmtDay} tick={{ fontSize: 11, fill: '#94a3b8' }} interval="preserveStartEnd" minTickGap={40} />
+          <YAxis domain={[0, 100]} tickFormatter={(v) => `${v}%`} tick={{ fontSize: 11, fill: '#94a3b8' }} width={44} />
+          <Tooltip formatter={(v, n) => [`${v}%`, n]} labelFormatter={fmtDay} contentStyle={{ borderRadius: 12, border: '1px solid #e2e8f0', fontSize: 12 }} />
+          {keys.map((k) => <Line key={k} type="monotone" dataKey={k} stroke={colorFor(k)} strokeWidth={2.5} dot={false} isAnimationActive={false} />)}
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+/* ============================ Market card + list ============================ */
+function MarketCard({ market, onOpen }) {
+  const top = [...market.outcomes].sort((a, b) => b.price - a.price).slice(0, market.type === 'binary' ? 2 : 3);
+  return (
+    <motion.button layout onClick={() => onOpen(market.id)} whileHover={{ y: -3 }}
+      className="text-left bg-white rounded-2xl border border-slate-200 p-4 hover:shadow-md transition-shadow flex flex-col gap-3">
+      <div className="flex items-start justify-between gap-2">
+        <span className="text-xs font-medium text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full">{market.category}</span>
+        <Badge status={market.status} />
+      </div>
+      <h3 className="font-semibold text-slate-800 leading-snug line-clamp-2">{market.question}</h3>
+      <div className="flex flex-col gap-1.5 mt-auto">
+        {top.map((o) => {
+          const c = market.type === 'binary' ? (o.label === 'Yes' ? '#10b981' : '#ef4444') : LINE_COLORS[market.outcomes.findIndex((x) => x.id === o.id) % LINE_COLORS.length];
+          return (
+            <div key={o.id} className="flex items-center gap-2 text-sm">
+              <span className="w-20 truncate text-slate-600">{o.label}</span>
+              <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
+                <div className="h-full rounded-full" style={{ width: `${o.price * 100}%`, background: c }} />
+              </div>
+              <span className="w-10 text-right font-semibold text-slate-700">{pct(o.price)}</span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="flex items-center justify-between text-xs text-slate-400 pt-1 border-t border-slate-100">
+        <span className="inline-flex items-center gap-1"><Activity className="w-3 h-3" /> Vol {money(market.volume)}</span>
+        <span className="inline-flex items-center gap-1"><Clock className="w-3 h-3" /> {market.status === 'resolved' ? 'Settled' : fromNow(market.close_date)}</span>
+      </div>
+    </motion.button>
+  );
+}
+
+function MarketsView({ ctx, markets, loading, filters, setFilters }) {
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-col sm:flex-row gap-3 sm:items-center">
+        <div className="relative flex-1">
+          <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <input value={filters.q} onChange={(e) => setFilters((f) => ({ ...f, q: e.target.value }))} placeholder="Search markets…"
+            className="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200" />
+        </div>
+        <select value={filters.sort} onChange={(e) => setFilters((f) => ({ ...f, sort: e.target.value }))}
+          className="px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white">
+          <option value="trending">Trending</option>
+          <option value="newest">Newest</option>
+        </select>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {['open', 'closed', 'resolved'].map((s) => (
+          <button key={s} onClick={() => setFilters((f) => ({ ...f, status: s }))}
+            className={`px-3 py-1.5 rounded-full text-sm font-medium capitalize ${filters.status === s ? 'bg-slate-800 text-white' : 'bg-white border border-slate-200 text-slate-600'}`}>{s}</button>
+        ))}
+        <div className="w-px bg-slate-200 mx-1" />
+        {['All', ...CATEGORIES].map((c) => (
+          <button key={c} onClick={() => setFilters((f) => ({ ...f, category: c }))}
+            className={`px-3 py-1.5 rounded-full text-sm ${filters.category === c ? 'bg-indigo-100 text-indigo-700 font-medium' : 'bg-white border border-slate-200 text-slate-500'}`}>{c}</button>
+        ))}
+      </div>
+      {loading ? (
+        <div className="flex justify-center py-20 text-slate-400"><Spinner className="w-8 h-8" /></div>
+      ) : markets.length === 0 ? (
+        <div className="text-center py-20 text-slate-400">No markets match these filters.</div>
+      ) : (
+        <motion.div layout className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {markets.map((m) => <MarketCard key={m.id} market={m} onOpen={ctx.openMarket} />)}
+        </motion.div>
+      )}
+    </div>
+  );
+}
+
+/* ============================ Trade panel ============================ */
+function TradePanel({ ctx, market }) {
+  const [outcomeId, setOutcomeId] = useState(market.outcomes[0].id);
+  const [side, setSide] = useState('buy');
+  const [shares, setShares] = useState(10);
+  const [quote, setQuote] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const held = (ctx.portfolio?.positions || []).find((p) => p.outcome_id === outcomeId)?.shares || 0;
+  const open = market.status === 'open';
+
+  useEffect(() => { setOutcomeId(market.outcomes[0].id); }, [market.id]);
+  useEffect(() => {
+    let alive = true;
+    const t = setTimeout(async () => {
+      try { const q = await ctx.ds.quote({ market, outcome_id: outcomeId, side, shares: Number(shares) || 0, balance: ctx.user?.balance, held }); if (alive) setQuote(q); }
+      catch { if (alive) setQuote(null); }
+    }, 220);
+    return () => { alive = false; clearTimeout(t); };
+  }, [outcomeId, side, shares, market, ctx.user?.balance, held]);
+
+  const submit = async () => {
+    if (!ctx.user) { ctx.requireAuth(); return; }
+    setBusy(true);
+    try {
+      const res = await ctx.ds.trade({ market_id: market.id, outcome_id: outcomeId, side, shares: Number(shares) });
+      ctx.setUserBalance(res.balance, res.realized_pnl);
+      ctx.applyPrices(market.id, res.prices, res.market_volume);
+      ctx.refreshPortfolio();
+      ctx.toast('success', `${side === 'buy' ? 'Bought' : 'Sold'} ${nf.format(res.trade.shares)} ${res.trade.outcome_label} @ ${pct1(res.trade.price)}`);
+    } catch (e) { ctx.toast('error', e.message); }
+    finally { setBusy(false); }
+  };
+
+  const sel = market.outcomes.find((o) => o.id === outcomeId);
+  const err = quote?.error;
+  const disabled = busy || !open || !!err || !Number(shares);
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-3">
+      <h3 className="font-bold text-slate-800">Trade</h3>
+      <div className="grid grid-cols-2 gap-2 p-1 bg-slate-100 rounded-xl">
+        {['buy', 'sell'].map((s) => (
+          <button key={s} onClick={() => setSide(s)}
+            className={`py-1.5 rounded-lg text-sm font-semibold capitalize ${side === s ? (s === 'buy' ? 'bg-emerald-500 text-white' : 'bg-rose-500 text-white') : 'text-slate-500'}`}>{s}</button>
+        ))}
+      </div>
+      <div className="space-y-1.5">
+        {market.outcomes.map((o) => (
+          <button key={o.id} onClick={() => setOutcomeId(o.id)}
+            className={`w-full flex items-center justify-between px-3 py-2 rounded-xl border text-sm ${outcomeId === o.id ? 'border-indigo-400 bg-indigo-50' : 'border-slate-200'}`}>
+            <span className="font-medium text-slate-700 truncate">{o.label}</span>
+            <span className="font-bold text-slate-800">{pct1(o.price)}</span>
+          </button>
+        ))}
+      </div>
+      <div>
+        <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
+          <span>Shares</span>
+          <button className="text-indigo-600 font-medium" onClick={() => {
+            if (side === 'sell') setShares(Math.floor(held));
+            else if (ctx.user) setShares(maxAffordable(market.outcomes.map((o) => o.shares_outstanding), market.liquidity_param, market.outcomes.indexOf(sel), ctx.user.balance));
+          }}>Max</button>
+        </div>
+        <input type="number" min="0" value={shares} onChange={(e) => setShares(e.target.value)}
+          className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200" />
+      </div>
+      {quote && !err && (
+        <div className="text-sm space-y-1 bg-slate-50 rounded-xl p-3">
+          <Row k="Price impact" v={`${pct1(quote.cur_price)} → ${pct1(quote.new_price)}`} />
+          <Row k="Avg fill" v={pct1(quote.avg_price)} />
+          {side === 'buy'
+            ? <><Row k="Cost" v={<Money value={quote.cost} />} /><Row k="Max payout" v={<Money value={quote.max_payout} />} highlight /></>
+            : <Row k="You receive" v={<Money value={quote.proceeds} />} highlight />}
+        </div>
+      )}
+      {err && <div className="text-sm text-rose-600 flex items-center gap-1.5"><AlertCircle className="w-4 h-4" />{err}</div>}
+      {!open && <div className="text-sm text-amber-600 flex items-center gap-1.5"><Clock className="w-4 h-4" />Market is {market.status}</div>}
+      <button onClick={submit} disabled={disabled}
+        className={`w-full py-2.5 rounded-xl font-semibold text-white flex items-center justify-center gap-2 ${disabled ? 'bg-slate-300' : side === 'buy' ? 'bg-emerald-500 hover:bg-emerald-600' : 'bg-rose-500 hover:bg-rose-600'}`}>
+        {busy ? <Spinner /> : !ctx.user ? <><LogIn className="w-4 h-4" /> Sign in to trade</> : <>{side === 'buy' ? 'Buy' : 'Sell'} {sel?.label}</>}
+      </button>
+    </div>
+  );
+}
+const Row = ({ k, v, highlight }) => (
+  <div className="flex items-center justify-between">
+    <span className="text-slate-500">{k}</span>
+    <span className={highlight ? 'font-bold text-slate-800' : 'font-medium text-slate-700'}>{v}</span>
+  </div>
+);
+
+/* ============================ Market detail ============================ */
+function ResolvePanel({ ctx, market }) {
+  const [busy, setBusy] = useState(false);
+  if (!ctx.user || !(ctx.user.is_admin || market.created_by === ctx.user.id) || market.status === 'resolved') return null;
+  const resolve = async (oid) => {
+    setBusy(true);
+    try { await ctx.ds.resolve(market.id, oid); ctx.refreshPortfolio(); ctx.toast('success', 'Market resolved & paid out'); }
+    catch (e) { ctx.toast('error', e.message); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div className="bg-white rounded-2xl border border-amber-200 p-4 space-y-2">
+      <h3 className="font-bold text-slate-800 flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-amber-500" /> Resolve (admin / creator)</h3>
+      <p className="text-xs text-slate-500">Pick the winning outcome. Each winning share pays 1.00 credit.</p>
+      <div className="flex flex-wrap gap-2">
+        {market.outcomes.map((o) => (
+          <button key={o.id} disabled={busy} onClick={() => resolve(o.id)}
+            className="px-3 py-1.5 rounded-xl border border-slate-200 text-sm font-medium hover:bg-amber-50 hover:border-amber-300">{o.label}</button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MarketDetailView({ ctx, detail, onBack }) {
+  const [comment, setComment] = useState('');
+  if (!detail) return <div className="flex justify-center py-20 text-slate-400"><Spinner className="w-8 h-8" /></div>;
+  const winner = detail.resolved_outcome_id && detail.outcomes.find((o) => o.id === detail.resolved_outcome_id);
+  const addComment = async () => {
+    if (!ctx.user) { ctx.requireAuth(); return; }
+    if (!comment.trim()) return;
+    try { await ctx.ds.addComment(detail.id, comment.trim()); setComment(''); }
+    catch (e) { ctx.toast('error', e.message); }
+  };
+  return (
+    <div className="space-y-4">
+      <button onClick={onBack} className="text-sm text-slate-500 hover:text-slate-700 flex items-center gap-1"><ChevronRight className="w-4 h-4 rotate-180" /> Back to markets</button>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div className="lg:col-span-2 space-y-4">
+          <div className="bg-white rounded-2xl border border-slate-200 p-5">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="text-xs font-medium text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full">{detail.category}</span>
+              <Badge status={detail.status} />
+              <span className="text-xs text-slate-400 ml-auto">{detail.status === 'resolved' ? 'Settled' : `Closes ${fromNow(detail.close_date)}`}</span>
+            </div>
+            <h1 className="text-xl font-bold text-slate-800">{detail.question}</h1>
+            {detail.description && <p className="text-sm text-slate-500 mt-2">{detail.description}</p>}
+            {winner && (
+              <div className="mt-3 inline-flex items-center gap-2 text-sm font-semibold text-emerald-700 bg-emerald-50 px-3 py-1.5 rounded-xl">
+                <CheckCircle2 className="w-4 h-4" /> Resolved: {winner.label}
+              </div>
+            )}
+          </div>
+          <div className="bg-white rounded-2xl border border-slate-200 p-5">
+            <h3 className="font-bold text-slate-800 mb-2 flex items-center gap-2"><BarChart3 className="w-4 h-4 text-indigo-500" /> Price history</h3>
+            <PriceChart market={detail} history={detail.history} />
+          </div>
+          {detail.resolution_criteria && (
+            <div className="bg-white rounded-2xl border border-slate-200 p-5">
+              <h3 className="font-bold text-slate-800 mb-1">Resolution criteria</h3>
+              <p className="text-sm text-slate-500">{detail.resolution_criteria}</p>
+            </div>
+          )}
+          <div className="bg-white rounded-2xl border border-slate-200 p-5">
+            <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2"><MessageSquare className="w-4 h-4 text-indigo-500" /> Discussion</h3>
+            <div className="flex gap-2 mb-4">
+              <input value={comment} onChange={(e) => setComment(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addComment()}
+                placeholder={ctx.user ? 'Add a comment…' : 'Sign in to comment'} className="flex-1 px-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200" />
+              <button onClick={addComment} className="px-3 rounded-xl bg-indigo-500 text-white hover:bg-indigo-600"><Send className="w-4 h-4" /></button>
+            </div>
+            <div className="space-y-3">
+              {(detail.comments || []).length === 0 && <p className="text-sm text-slate-400">No comments yet.</p>}
+              {(detail.comments || []).map((c) => (
+                <div key={c.id} className="flex gap-2.5">
+                  <Avatar user={c.user} />
+                  <div>
+                    <div className="text-sm"><span className="font-semibold text-slate-700">{c.user.name}</span> <span className="text-xs text-slate-400">{fromNow(c.created_at)}</span></div>
+                    <p className="text-sm text-slate-600">{c.text}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+        <div className="space-y-4">
+          <TradePanel ctx={ctx} market={detail} />
+          <ResolvePanel ctx={ctx} market={detail} />
+          <div className="bg-white rounded-2xl border border-slate-200 p-4">
+            <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2"><Activity className="w-4 h-4 text-indigo-500" /> Recent trades</h3>
+            <div className="space-y-2">
+              {(detail.recent_trades || []).length === 0 && <p className="text-sm text-slate-400">No trades yet.</p>}
+              {(detail.recent_trades || []).map((t) => {
+                const u = tradeUser(t);
+                return (
+                  <div key={t.id} className="flex items-center gap-2 text-sm">
+                    <Avatar user={u} size="w-6 h-6" />
+                    <span className="font-medium text-slate-600 truncate flex-1">{u.name}</span>
+                    <span className={`inline-flex items-center gap-0.5 font-semibold ${t.side === 'buy' ? 'text-emerald-600' : 'text-rose-600'}`}>
+                      {t.side === 'buy' ? <ArrowUpRight className="w-3 h-3" /> : <ArrowDownRight className="w-3 h-3" />}{nf.format(t.shares)}
+                    </span>
+                    <span className="text-slate-400 truncate max-w-16">{t.outcome_label}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================ Portfolio + leaderboard ============================ */
+function PortfolioView({ ctx }) {
+  const [data, setData] = useState(null); const [trades, setTrades] = useState([]); const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      setLoading(true);
+      try { const [p, t] = await Promise.all([ctx.ds.portfolio(), ctx.ds.myTrades()]); if (alive) { setData(p); setTrades(t); } }
+      catch (e) { ctx.toast('error', e.message); }
+      finally { if (alive) setLoading(false); }
+    })();
+    return () => { alive = false; };
+  }, [ctx.portfolioVersion]);
+  if (loading) return <div className="flex justify-center py-20 text-slate-400"><Spinner className="w-8 h-8" /></div>;
+  if (!data) return <div className="text-center py-20 text-slate-400">Sign in to view your portfolio.</div>;
+  const stats = [
+    { label: 'Net worth', value: data.net_worth, icon: Wallet },
+    { label: 'Cash', value: data.cash, icon: Coins },
+    { label: 'Positions', value: data.positions_value, icon: BarChart3 },
+    { label: 'Unrealized P&L', value: data.unrealized_pnl, icon: TrendingUp, pnl: true },
+    { label: 'Realized P&L', value: data.realized_pnl, icon: CheckCircle2, pnl: true },
+  ];
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        {stats.map((s) => (
+          <div key={s.label} className="bg-white rounded-2xl border border-slate-200 p-4">
+            <div className="flex items-center gap-1.5 text-xs text-slate-400"><s.icon className="w-3.5 h-3.5" />{s.label}</div>
+            <div className={`text-lg font-bold mt-1 ${s.pnl ? (s.value >= 0 ? 'text-emerald-600' : 'text-rose-600') : 'text-slate-800'}`}>
+              {s.pnl && s.value >= 0 ? '+' : ''}{money(s.value)}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+        <h3 className="font-bold text-slate-800 px-5 py-3 border-b border-slate-100">Open positions</h3>
+        {data.positions.length === 0 ? <p className="px-5 py-6 text-sm text-slate-400">No open positions.</p> : (
+          <div className="divide-y divide-slate-100">
+            {data.positions.map((p) => (
+              <button key={p.outcome_id} onClick={() => ctx.openMarket(p.market_id)} className="w-full text-left px-5 py-3 hover:bg-slate-50 flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-slate-700 truncate">{p.question}</div>
+                  <div className="text-xs text-slate-400">{nf.format(p.shares)} × {p.outcome_label} @ {pct1(p.avg_price)} → {pct1(p.cur_price)}</div>
+                </div>
+                <div className="text-right shrink-0">
+                  <div className="text-sm font-semibold text-slate-800">{money(p.value)}</div>
+                  <div className={`text-xs font-medium ${p.unrealized_pnl >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{p.unrealized_pnl >= 0 ? '+' : ''}{money(p.unrealized_pnl)}</div>
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      {trades.length > 0 && (
+        <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+          <h3 className="font-bold text-slate-800 px-5 py-3 border-b border-slate-100">Recent activity</h3>
+          <div className="divide-y divide-slate-100">
+            {trades.slice(0, 12).map((t) => (
+              <div key={t.id} className="px-5 py-2.5 flex items-center justify-between text-sm">
+                <div className="min-w-0">
+                  <span className={`font-semibold capitalize ${t.side === 'buy' ? 'text-emerald-600' : 'text-rose-600'}`}>{t.side}</span>
+                  <span className="text-slate-600"> {nf.format(t.shares)} {t.outcome_label}</span>
+                  <span className="text-slate-400 truncate"> · {t.question}</span>
+                </div>
+                <span className="text-slate-500 shrink-0">{pct1(t.price)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LeaderboardView({ ctx }) {
+  const [rows, setRows] = useState(null);
+  useEffect(() => { let a = true; ctx.ds.leaderboard().then((r) => a && setRows(r)).catch(() => a && setRows([])); return () => { a = false; }; }, [ctx.portfolioVersion]);
+  if (!rows) return <div className="flex justify-center py-20 text-slate-400"><Spinner className="w-8 h-8" /></div>;
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden max-w-2xl mx-auto">
+      <h3 className="font-bold text-slate-800 px-5 py-3 border-b border-slate-100 flex items-center gap-2"><Trophy className="w-4 h-4 text-amber-500" /> Leaderboard</h3>
+      <div className="divide-y divide-slate-100">
+        {rows.map((r, i) => (
+          <div key={r.id} className="px-5 py-3 flex items-center gap-3">
+            <span className={`w-6 text-center font-bold ${i < 3 ? 'text-amber-500' : 'text-slate-300'}`}>{i + 1}</span>
+            <Avatar user={r} />
+            <span className="font-medium text-slate-700 flex-1">{r.name}{r.is_bot && <span className="text-xs text-slate-400 ml-1">bot</span>}</span>
+            <div className="text-right">
+              <div className="font-semibold text-slate-800">{money(r.net_worth)}</div>
+              <div className={`text-xs ${r.profit >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{r.profit >= 0 ? '+' : ''}{money(r.profit)}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ============================ Create market + auth modals ============================ */
+function toLocalInput(d) { const p = (n) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; }
+function CreateMarketModal({ ctx, open, onClose }) {
+  const [f, setF] = useState({ question: '', description: '', category: 'Other', type: 'binary', liquidity_param: 150, resolution_criteria: '' });
+  const [outcomes, setOutcomes] = useState(['', '']);
+  const [close, setClose] = useState(toLocalInput(new Date(Date.now() + 7 * DAY)));
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    if (!ctx.user) { ctx.requireAuth(); return; }
+    setBusy(true);
+    try {
+      const m = await ctx.ds.createMarket({ ...f, liquidity_param: Number(f.liquidity_param), close_date: new Date(close).toISOString(), outcomes: f.type === 'categorical' ? outcomes : [] });
+      ctx.toast('success', 'Market created'); onClose(); ctx.openMarket(m.id);
+    } catch (e) { ctx.toast('error', e.message); }
+    finally { setBusy(false); }
+  };
+  return (
+    <Modal open={open} onClose={onClose} title="Create a market">
+      <div className="space-y-3">
+        <input value={f.question} onChange={(e) => setF({ ...f, question: e.target.value })} placeholder="Question (e.g. Will X happen by …?)"
+          className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200" />
+        <textarea value={f.description} onChange={(e) => setF({ ...f, description: e.target.value })} placeholder="Description" rows={2}
+          className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200" />
+        <div className="grid grid-cols-2 gap-2">
+          <select value={f.category} onChange={(e) => setF({ ...f, category: e.target.value })} className="px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white">
+            {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
+          </select>
+          <select value={f.type} onChange={(e) => setF({ ...f, type: e.target.value })} className="px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white">
+            <option value="binary">Binary (Yes/No)</option>
+            <option value="categorical">Categorical</option>
+          </select>
+        </div>
+        {f.type === 'categorical' && (
+          <div className="space-y-2">
+            {outcomes.map((o, i) => (
+              <div key={i} className="flex gap-2">
+                <input value={o} onChange={(e) => setOutcomes(outcomes.map((x, j) => (j === i ? e.target.value : x)))} placeholder={`Outcome ${i + 1}`}
+                  className="flex-1 px-3 py-2 rounded-xl border border-slate-200 text-sm" />
+                {outcomes.length > 2 && <button onClick={() => setOutcomes(outcomes.filter((_, j) => j !== i))} className="px-2 text-slate-400"><X className="w-4 h-4" /></button>}
+              </div>
+            ))}
+            <button onClick={() => setOutcomes([...outcomes, ''])} className="text-sm text-indigo-600 font-medium">+ Add outcome</button>
+          </div>
+        )}
+        <div className="grid grid-cols-2 gap-2">
+          <label className="text-xs text-slate-500">Close date
+            <input type="datetime-local" value={close} onChange={(e) => setClose(e.target.value)} className="w-full mt-1 px-3 py-2 rounded-xl border border-slate-200 text-sm" />
+          </label>
+          <label className="text-xs text-slate-500">Liquidity (b)
+            <input type="number" value={f.liquidity_param} onChange={(e) => setF({ ...f, liquidity_param: e.target.value })} className="w-full mt-1 px-3 py-2 rounded-xl border border-slate-200 text-sm" />
+          </label>
+        </div>
+        <input value={f.resolution_criteria} onChange={(e) => setF({ ...f, resolution_criteria: e.target.value })} placeholder="Resolution criteria"
+          className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
+        <button onClick={submit} disabled={busy || f.question.length < 8} className={`w-full py-2.5 rounded-xl font-semibold text-white flex items-center justify-center gap-2 ${busy || f.question.length < 8 ? 'bg-slate-300' : 'bg-indigo-500 hover:bg-indigo-600'}`}>
+          {busy ? <Spinner /> : <><Plus className="w-4 h-4" /> Create market</>}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+function AuthModal({ ctx, open, onClose }) {
+  const [mode, setMode] = useState('login');
+  const [name, setName] = useState(ctx.dsMode === 'demo' ? 'You' : '');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState(ctx.dsMode === 'demo' ? 'demo1234' : '');
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    setBusy(true);
+    try { await ctx.doAuth(mode, { name, email, password }); onClose(); }
+    catch (e) { ctx.toast('error', e.message); }
+    finally { setBusy(false); }
+  };
+  return (
+    <Modal open={open} onClose={onClose} title={mode === 'login' ? 'Sign in' : 'Create account'}>
+      <div className="space-y-3">
+        {ctx.dsMode === 'demo' && <div className="text-xs bg-amber-50 text-amber-700 rounded-xl px-3 py-2">Demo mode — any credentials work. Prefilled with the seed user <b>You</b>.</div>}
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Username" className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
+        {mode === 'register' && <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email (optional)" className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />}
+        <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && submit()} placeholder="Password" className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
+        <button onClick={submit} disabled={busy} className="w-full py-2.5 rounded-xl font-semibold text-white bg-indigo-500 hover:bg-indigo-600 flex items-center justify-center gap-2">
+          {busy ? <Spinner /> : mode === 'login' ? 'Sign in' : 'Create account'}
+        </button>
+        <button onClick={() => setMode(mode === 'login' ? 'register' : 'login')} className="w-full text-sm text-slate-500">
+          {mode === 'login' ? "No account? Register" : 'Have an account? Sign in'}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+/* ============================ App ============================ */
+export default function App() {
+  const [mode, setMode] = useState('connecting'); // connecting | live | demo
+  const [token, setToken] = useState(null);
+  const [user, setUser] = useState(null);
+  const [view, setView] = useState({ name: 'markets' });
+  const [markets, setMarkets] = useState([]);
+  const [loadingMarkets, setLoadingMarkets] = useState(false);
+  const [filters, setFilters] = useState({ status: 'open', category: 'All', q: '', sort: 'trending' });
+  const [detail, setDetail] = useState(null);
+  const [portfolio, setPortfolio] = useState(null);
+  const [portfolioVersion, setPortfolioVersion] = useState(0);
+  const [authOpen, setAuthOpen] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [toasts, setToasts] = useState([]);
+
+  const toast = useCallback((type, msg) => {
+    const id = makeId(); setToasts((t) => [...t, { id, type, msg }]);
+    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3500);
+  }, []);
+
+  const ds = useMemo(() => (mode === 'demo' ? makeDemoDS(demoState.you.id) : makeLiveDS(token)), [mode, token]);
+
+  /* connection probe */
+  useEffect(() => {
+    let alive = true;
+    (async () => { try { await http('/config', { timeout: 2500 }); if (alive) setMode('live'); } catch { if (alive) setMode('demo'); } })();
+    return () => { alive = false; };
+  }, []);
+  useEffect(() => { if (mode === 'demo' && !user) { setUser(demoState.you); setToken('demo'); } }, [mode]); // eslint-disable-line
+
+  /* market list */
+  const loadMarkets = useCallback(async () => {
+    setLoadingMarkets(true);
+    try { setMarkets(await ds.listMarkets({ status: filters.status, category: filters.category, q: filters.q, sort: filters.sort, limit: 60 })); }
+    catch (e) { toast('error', e.message); }
+    finally { setLoadingMarkets(false); }
+  }, [ds, filters, toast]);
+  useEffect(() => { if (mode !== 'connecting') loadMarkets(); }, [mode, filters, loadMarkets]);
+
+  const refreshPortfolio = useCallback(async () => {
+    if (!user) { setPortfolio(null); return; }
+    try { setPortfolio(await ds.portfolio()); setPortfolioVersion((v) => v + 1); } catch { /* ignore */ }
+  }, [ds, user]);
+  useEffect(() => { refreshPortfolio(); }, [user, mode]); // eslint-disable-line
+
+  const applyPrices = useCallback((marketId, prices, volume) => {
+    const byId = Object.fromEntries(prices.map((p) => [p.outcome_id, p]));
+    const patch = (o) => byId[o.id] ? { ...o, price: byId[o.id].price, shares_outstanding: byId[o.id].shares_outstanding ?? o.shares_outstanding } : o;
+    setMarkets((ms) => ms.map((m) => m.id === marketId ? { ...m, outcomes: m.outcomes.map(patch), volume: volume ?? m.volume } : m));
+    setDetail((d) => d && d.id === marketId ? { ...d, outcomes: d.outcomes.map(patch), volume: volume ?? d.volume } : d);
+  }, []);
+
+  /* realtime event handler */
+  const handleEvent = useCallback((e) => {
+    if (e.type === 'market_update') {
+      applyPrices(e.market_id, e.prices, e.volume);
+      setDetail((d) => {
+        if (!d || d.id !== e.market_id) return d;
+        const trades = [e.trade, ...(d.recent_trades || [])].slice(0, 20);
+        const history = [...(d.history || []), { t: e.trade?.created_at || new Date().toISOString(), values: e.prices.map((p) => p.price) }].slice(-200);
+        return { ...d, recent_trades: trades, history };
+      });
+    } else if (e.type === 'market_resolved') {
+      const byId = Object.fromEntries(e.prices.map((p) => [p.outcome_id, p.price]));
+      const patch = (o) => ({ ...o, price: byId[o.id] ?? o.price });
+      setMarkets((ms) => ms.map((m) => m.id === e.market_id ? { ...m, status: 'resolved', resolved_outcome_id: e.resolved_outcome_id, outcomes: m.outcomes.map(patch) } : m));
+      setDetail((d) => d && d.id === e.market_id ? { ...d, status: 'resolved', resolved_outcome_id: e.resolved_outcome_id, outcomes: d.outcomes.map(patch) } : d);
+    } else if (e.type === 'market_created') {
+      const m = e.market;
+      const ok = (filters.status === 'All' || m.status === filters.status) && (filters.category === 'All' || m.category === filters.category);
+      if (ok) setMarkets((ms) => [m, ...ms.filter((x) => x.id !== m.id)]);
+    } else if (e.type === 'comment') {
+      setDetail((d) => d && d.id === e.market_id ? { ...d, comments: [{ id: e.id, text: e.text, created_at: e.created_at, user: e.user }, ...(d.comments || [])] } : d);
+    }
+  }, [applyPrices, filters]);
+  const handlerRef = useRef(handleEvent);
+  useEffect(() => { handlerRef.current = handleEvent; }, [handleEvent]);
+  const rt = useRealtime(mode === 'connecting' ? 'idle' : mode, handlerRef);
+
+  /* per-market subscription */
+  useEffect(() => {
+    if (view.name === 'market' && detail?.id) { rt.subscribe(`market:${detail.id}`); return () => rt.unsubscribe(`market:${detail.id}`); }
+    return undefined;
+  }, [view.name, detail?.id, rt]);
+
+  const openMarket = useCallback(async (id) => {
+    setView({ name: 'market', id }); setDetail(null);
+    try { setDetail(await ds.getMarket(id)); } catch (e) { toast('error', e.message); }
+  }, [ds, toast]);
+
+  const doAuth = useCallback(async (kind, { name, email, password }) => {
+    if (mode === 'demo') {
+      const u = Object.values(demoState.users).find((x) => x.name === name) || demoState.you;
+      setUser(u); setToken('demo'); toast('success', `Signed in as ${u.name}`); return;
+    }
+    const tok = kind === 'login' ? (await loginHttp(name, password)).access_token : (await http('/auth/register', { method: 'POST', body: { name, email: email || null, password } })).access_token;
+    setToken(tok);
+    const me = await http('/auth/me', { headers: { Authorization: `Bearer ${tok}` } });
+    setUser(me); toast('success', `Welcome, ${me.name}`);
+  }, [mode, toast]);
+
+  const logout = () => { setUser(mode === 'demo' ? demoState.you : null); setToken(mode === 'demo' ? 'demo' : null); setPortfolio(null); };
+
+  const ctx = {
+    ds, dsMode: mode, user, portfolio, portfolioVersion, openMarket, toast, refreshPortfolio, applyPrices, doAuth,
+    requireAuth: () => setAuthOpen(true),
+    setUserBalance: (bal, realized) => setUser((u) => u ? { ...u, balance: bal, realized_pnl: realized ?? u.realized_pnl } : u),
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-900" style={{ fontFamily: 'ui-sans-serif, system-ui, sans-serif' }}>
+      {/* connection banner */}
+      {mode === 'demo' && (
+        <div className="bg-amber-500 text-white text-sm px-4 py-2 flex items-center justify-center gap-2 flex-wrap">
+          <WifiOff className="w-4 h-4" /> Backend not reachable — running on in-browser demo data with live LMSR math.
+          <button onClick={() => { setMode('connecting'); http('/config', { timeout: 2500 }).then(() => setMode('live')).catch(() => setMode('demo')); }} className="underline font-medium">Retry connection</button>
+        </div>
+      )}
+
+      <header className="sticky top-0 z-30 bg-white/90 backdrop-blur border-b border-slate-200">
+        <div className="max-w-6xl mx-auto px-4 h-14 flex items-center gap-3">
+          <button onClick={() => setView({ name: 'markets' })} className="flex items-center gap-2 font-bold text-slate-800">
+            <div className="w-8 h-8 rounded-xl bg-indigo-500 flex items-center justify-center text-white"><Sparkles className="w-4 h-4" /></div>
+            ForeCast
+          </button>
+          <nav className="hidden sm:flex items-center gap-1 ml-2">
+            {[['markets', 'Markets', TrendingUp], ['portfolio', 'Portfolio', Wallet], ['leaderboard', 'Leaderboard', Trophy]].map(([k, label, Icon]) => (
+              <button key={k} onClick={() => setView({ name: k })} className={`px-3 py-1.5 rounded-lg text-sm font-medium flex items-center gap-1.5 ${view.name === k ? 'bg-slate-100 text-slate-800' : 'text-slate-500 hover:text-slate-700'}`}>
+                <Icon className="w-4 h-4" />{label}
+              </button>
+            ))}
+          </nav>
+          <div className="ml-auto flex items-center gap-2">
+            {mode === 'live' && <span className="hidden sm:inline-flex items-center gap-1 text-xs text-emerald-600"><Wifi className="w-3.5 h-3.5" />{rt.status === 'open' ? 'live' : 'connecting'}</span>}
+            <button onClick={() => setCreateOpen(true)} className="px-3 py-1.5 rounded-lg bg-indigo-500 text-white text-sm font-medium flex items-center gap-1 hover:bg-indigo-600"><Plus className="w-4 h-4" /><span className="hidden sm:inline">New</span></button>
+            {user ? (
+              <div className="flex items-center gap-2">
+                <span className="hidden sm:inline-flex"><Money value={user.balance} className="text-sm font-semibold text-slate-700" /></span>
+                <Avatar user={user} />
+                <button onClick={logout} className="text-slate-400 hover:text-slate-600"><LogOut className="w-4 h-4" /></button>
+              </div>
+            ) : (
+              <button onClick={() => setAuthOpen(true)} className="px-3 py-1.5 rounded-lg border border-slate-200 text-sm font-medium flex items-center gap-1"><LogIn className="w-4 h-4" />Sign in</button>
+            )}
+          </div>
+        </div>
+        <nav className="sm:hidden flex border-t border-slate-100">
+          {[['markets', 'Markets'], ['portfolio', 'Portfolio'], ['leaderboard', 'Leaders']].map(([k, label]) => (
+            <button key={k} onClick={() => setView({ name: k })} className={`flex-1 py-2 text-sm font-medium ${view.name === k ? 'text-indigo-600 border-b-2 border-indigo-500' : 'text-slate-500'}`}>{label}</button>
+          ))}
+        </nav>
+      </header>
+
+      <main className="max-w-6xl mx-auto px-4 py-6">
+        {mode === 'connecting' ? (
+          <div className="flex flex-col items-center py-24 text-slate-400 gap-3"><Spinner className="w-8 h-8" /><span className="text-sm">Connecting to backend…</span></div>
+        ) : view.name === 'markets' ? (
+          <MarketsView ctx={ctx} markets={markets} loading={loadingMarkets} filters={filters} setFilters={setFilters} />
+        ) : view.name === 'market' ? (
+          <MarketDetailView ctx={ctx} detail={detail} onBack={() => setView({ name: 'markets' })} />
+        ) : view.name === 'portfolio' ? (
+          <PortfolioView ctx={ctx} />
+        ) : (
+          <LeaderboardView ctx={ctx} />
+        )}
+      </main>
+
+      <CreateMarketModal ctx={ctx} open={createOpen} onClose={() => setCreateOpen(false)} />
+      <AuthModal ctx={ctx} open={authOpen} onClose={() => setAuthOpen(false)} />
+
+      {/* toasts */}
+      <div className="fixed bottom-4 right-4 z-50 space-y-2">
+        <AnimatePresence>
+          {toasts.map((t) => (
+            <motion.div key={t.id} initial={{ opacity: 0, x: 40 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 40 }}
+              className={`px-4 py-2.5 rounded-xl shadow-lg text-sm font-medium text-white flex items-center gap-2 ${t.type === 'error' ? 'bg-rose-500' : 'bg-emerald-500'}`}>
+              {t.type === 'error' ? <AlertCircle className="w-4 h-4" /> : <Check className="w-4 h-4" />}{t.msg}
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
+    </div>
+  );
+}
