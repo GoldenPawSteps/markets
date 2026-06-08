@@ -1,0 +1,16 @@
+.venv/
+**/.venv/
+forecast-backend/.venv/
+forecast-frontend/node_modules/
+forecast-frontend/dist/
+forecast-frontend/.vite/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.log
+*.env
+.DS_Store
+.vscode/
+.idea/

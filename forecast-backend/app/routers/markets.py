@@ -1,4 +1,5 @@
 # app/routers/markets.py
+import math
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, desc
 from sqlalchemy.orm import selectinload
@@ -74,16 +75,26 @@ async def create_market(
         resolution_criteria=body.resolution_criteria or "", created_by=user.id,
         close_date=close, status="open",
     )
+    n = len(labels)
+    collateral = m.liquidity_param * math.log(n)
+    locked_user = (await db.execute(
+        select(User).where(User.id == user.id).with_for_update()
+    )).scalar_one()
+    if collateral > locked_user.balance + 1e-9:
+        raise HTTPException(400, "Insufficient balance")
+    locked_user.balance -= collateral
+
     db.add(m)
     await db.flush()
     for i, label in enumerate(labels):
         db.add(Outcome(market_id=m.id, label=label, position=i, shares_outstanding=0.0))
-    n = len(labels)
     db.add(PricePoint(market_id=m.id, prices=[1.0 / n] * n))
     await db.commit()
 
     m = await _load(db, m.id)
     out = crud.build_market_out(m)
+    out["balance"] = locked_user.balance
+    out["realized_pnl"] = locked_user.realized_pnl
     await manager.publish("feed", {"type": "market_created", "market": out})
     return out
 
@@ -167,6 +178,10 @@ async def resolve(
     if not (user.is_admin or m.created_by == user.id):
         raise HTTPException(403, "Only the creator or an admin can resolve this market")
     result = await crud.resolve_market(db, market_id, body.winning_outcome_id)
+    if user.id == m.created_by:
+        creator = await db.get(User, user.id)
+        result["balance"] = creator.balance
+        result["realized_pnl"] = creator.realized_pnl
     msg = {"type": "market_resolved", **result}
     await manager.publish(f"market:{market_id}", msg)
     await manager.publish("feed", msg)

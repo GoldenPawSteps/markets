@@ -10,10 +10,28 @@ import {
 import { motion, AnimatePresence } from 'framer-motion';
 
 /* ============================ Config ============================ */
-// Point these at your FastAPI server. The Vite (5173) / CRA (3000) origins are
-// already in the backend CORS allow-list.
-const API_BASE = (typeof window !== 'undefined' && window.__FORECAST_API__) || 'http://localhost:8000';
-const WS_BASE  = (typeof window !== 'undefined' && window.__FORECAST_WS__)  || 'ws://localhost:8000/ws';
+// Point these at your FastAPI server. The Vite dev server proxies /api and /ws to backend localhost:8000.
+// Production still defaults to the browser hostname on port 8000 unless overridden.
+const defaultApiHost = (() => {
+  if (typeof window === 'undefined') return 'http://localhost:8000';
+  if (import.meta.env.DEV) return '/api';
+  const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
+  return `${protocol}//${window.location.hostname}:8000`;
+})();
+const defaultWsHost = (() => {
+  if (typeof window === 'undefined') return 'ws://localhost:8000/ws';
+  if (import.meta.env.DEV) return `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${window.location.hostname}:8000/ws`;
+})();
+const API_BASE = (typeof window !== 'undefined' && (window.__FORECAST_API__ || import.meta.env.VITE_API_BASE)) || defaultApiHost;
+const WS_BASE  = (typeof window !== 'undefined' && (window.__FORECAST_WS__ || import.meta.env.VITE_WS_BASE)) || defaultWsHost;
+const usingDevProxy = import.meta.env.DEV && API_BASE === '/api';
+const backendAccessMode = usingDevProxy ? 'Vite proxy active' : 'Direct backend access';
+
+if (typeof window !== 'undefined') {
+  console.debug('ForeCast config', { API_BASE, WS_BASE, usingDevProxy, backendAccessMode });
+}
 
 const CATEGORIES = ['Crypto', 'Economics', 'Sports', 'Tech', 'Weather', 'Climate', 'Politics', 'Other'];
 const LINE_COLORS = ['#6366f1', '#10b981', '#f59e0b', '#ef4444', '#06b6d4', '#a855f7'];
@@ -323,8 +341,17 @@ function makeDemoDS(userId) {
     createMarket: async (b) => {
       const labels = b.type === 'binary' ? ['Yes', 'No'] : b.outcomes.filter((x) => x.trim());
       const outcomes = labels.map((label, i) => ({ id: makeId(), label, position: i, shares_outstanding: 0 }));
+      const u = demoState.users[userId];
+      const collateral = b.liquidity_param * Math.log(labels.length);
+      if (collateral > u.balance + 1e-9) {
+        throw new Error('Insufficient balance');
+      }
+      u.balance -= collateral;
       const m = { id: makeId(), question: b.question, description: b.description || '', category: b.category, type: b.type, liquidity_param: b.liquidity_param, resolution_criteria: b.resolution_criteria || '', created_by: userId, created_at: new Date().toISOString(), close_date: b.close_date, volume: 0, status: 'open', resolved_outcome_id: null, outcomes, history: [{ t: new Date().toISOString(), values: labels.map(() => 1 / labels.length) }], recent_trades: [], comments: [] };
-      demoState.markets.unshift(m); const out = marketOut(m, true); demoEmitter.emit({ type: 'market_created', market: marketOut(m) }); return out;
+      demoState.markets.unshift(m);
+      const out = marketOut(m, true);
+      demoEmitter.emit({ type: 'market_created', market: marketOut(m) });
+      return { ...out, balance: u.balance };
     },
     me: async () => demoState.users[userId],
   };
@@ -402,10 +429,10 @@ function PriceChart({ market, history }) {
   return (
     <div className="h-72 w-full">
       <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: -16 }}>
+        <LineChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 20 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
           <XAxis dataKey="t" tickFormatter={fmtDay} tick={{ fontSize: 11, fill: '#94a3b8' }} interval="preserveStartEnd" minTickGap={40} />
-          <YAxis domain={[0, 100]} tickFormatter={(v) => `${v}%`} tick={{ fontSize: 11, fill: '#94a3b8' }} width={44} />
+          <YAxis domain={[0, 100]} tickFormatter={(v) => `${v}%`} tick={{ fontSize: 11, fill: '#94a3b8' }} width={50} />
           <Tooltip formatter={(v, n) => [`${v}%`, n]} labelFormatter={fmtDay} contentStyle={{ borderRadius: 12, border: '1px solid #e2e8f0', fontSize: 12 }} />
           {keys.map((k) => <Line key={k} type="monotone" dataKey={k} stroke={colorFor(k)} strokeWidth={2.5} dot={false} isAnimationActive={false} />)}
         </LineChart>
@@ -419,7 +446,7 @@ function MarketCard({ market, onOpen }) {
   const top = [...market.outcomes].sort((a, b) => b.price - a.price).slice(0, market.type === 'binary' ? 2 : 3);
   return (
     <motion.button layout onClick={() => onOpen(market.id)} whileHover={{ y: -3 }}
-      className="text-left bg-white rounded-2xl border border-slate-200 p-4 hover:shadow-md transition-shadow flex flex-col gap-3">
+      className="group market-card text-left bg-white rounded-3xl border border-slate-200 p-5 hover:shadow-xl transition-all duration-200 flex flex-col gap-4">
       <div className="flex items-start justify-between gap-2">
         <span className="text-xs font-medium text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full">{market.category}</span>
         <Badge status={market.status} />
@@ -449,7 +476,22 @@ function MarketCard({ market, onOpen }) {
 
 function MarketsView({ ctx, markets, loading, filters, setFilters }) {
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+        <div className="max-w-2xl">
+          <p className="text-xs uppercase tracking-[0.3em] text-indigo-600 font-semibold">Markets</p>
+          <h2 className="mt-3 text-3xl font-bold tracking-tight text-slate-900">Trade event outcomes in real time</h2>
+          <p className="mt-2 text-sm text-slate-500">Filter by status, category, and momentum to find the markets you want to trade.</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <div className="inline-flex items-center gap-2 rounded-full bg-slate-100 px-4 py-2 text-sm font-medium text-slate-700">
+            <span className="text-slate-900">{markets.length}</span> markets
+          </div>
+          <div className="inline-flex items-center gap-2 rounded-full bg-indigo-50 px-4 py-2 text-sm font-medium text-indigo-700">
+            {filters.status.charAt(0).toUpperCase() + filters.status.slice(1)} status
+          </div>
+        </div>
+      </div>
       <div className="flex flex-col sm:flex-row gap-3 sm:items-center">
         <div className="relative flex-1">
           <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -462,15 +504,15 @@ function MarketsView({ ctx, markets, loading, filters, setFilters }) {
           <option value="newest">Newest</option>
         </select>
       </div>
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap gap-2 items-center">
         {['open', 'closed', 'resolved'].map((s) => (
           <button key={s} onClick={() => setFilters((f) => ({ ...f, status: s }))}
-            className={`px-3 py-1.5 rounded-full text-sm font-medium capitalize ${filters.status === s ? 'bg-slate-800 text-white' : 'bg-white border border-slate-200 text-slate-600'}`}>{s}</button>
+            className={`h-10 px-4 rounded-full text-sm font-medium capitalize ${filters.status === s ? 'bg-slate-800 text-white' : 'bg-white border border-slate-200 text-slate-600 hover:border-slate-300 hover:text-slate-800'}`}>{s}</button>
         ))}
-        <div className="w-px bg-slate-200 mx-1" />
+        <div className="w-px h-8 bg-slate-200 mx-1" />
         {['All', ...CATEGORIES].map((c) => (
           <button key={c} onClick={() => setFilters((f) => ({ ...f, category: c }))}
-            className={`px-3 py-1.5 rounded-full text-sm ${filters.category === c ? 'bg-indigo-100 text-indigo-700 font-medium' : 'bg-white border border-slate-200 text-slate-500'}`}>{c}</button>
+            className={`h-10 px-4 rounded-full text-sm ${filters.category === c ? 'bg-indigo-100 text-indigo-700 font-medium' : 'bg-white border border-slate-200 text-slate-500 hover:border-slate-300 hover:text-slate-700'}`}>{c}</button>
         ))}
       </div>
       {loading ? (
@@ -478,7 +520,7 @@ function MarketsView({ ctx, markets, loading, filters, setFilters }) {
       ) : markets.length === 0 ? (
         <div className="text-center py-20 text-slate-400">No markets match these filters.</div>
       ) : (
-        <motion.div layout className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <motion.div layout className="market-grid gap-4 grid">
           {markets.map((m) => <MarketCard key={m.id} market={m} onOpen={ctx.openMarket} />)}
         </motion.div>
       )}
@@ -583,8 +625,16 @@ function ResolvePanel({ ctx, market }) {
   if (!ctx.user || !(ctx.user.is_admin || market.created_by === ctx.user.id) || market.status === 'resolved') return null;
   const resolve = async (oid) => {
     setBusy(true);
-    try { await ctx.ds.resolve(market.id, oid); ctx.refreshPortfolio(); ctx.toast('success', 'Market resolved & paid out'); }
-    catch (e) { ctx.toast('error', e.message); }
+    try {
+      const res = await ctx.ds.resolve(market.id, oid);
+      if (res.balance != null) ctx.setUserBalance(res.balance, res.realized_pnl);
+      ctx.refreshPortfolio();
+      if (res.maker_refund != null) {
+        ctx.toast('success', `Market resolved & refunded ${money(res.maker_refund)} to the maker`);
+      } else {
+        ctx.toast('success', 'Market resolved & paid out');
+      }
+    } catch (e) { ctx.toast('error', e.message); }
     finally { setBusy(false); }
   };
   return (
@@ -712,50 +762,76 @@ function PortfolioView({ ctx }) {
     { label: 'Realized P&L', value: data.realized_pnl, icon: CheckCircle2, pnl: true },
   ];
   return (
-    <div className="space-y-4">
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+    <div className="space-y-6">
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-center gap-3">
+          <div>
+            <p className="text-xs uppercase tracking-[0.3em] text-indigo-600 font-semibold">Portfolio</p>
+            <h2 className="mt-2 text-3xl font-bold tracking-tight text-slate-900">Your account snapshot</h2>
+          </div>
+          <div className="rounded-2xl bg-slate-100 px-4 py-2 text-sm text-slate-700">Tracked across {data.positions.length} open positions</div>
+        </div>
+        <p className="max-w-2xl text-sm text-slate-500">View your total value, cash balance, and recent activity. Tap a position to jump back into the market.</p>
+      </div>
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
         {stats.map((s) => (
-          <div key={s.label} className="bg-white rounded-2xl border border-slate-200 p-4">
-            <div className="flex items-center gap-1.5 text-xs text-slate-400"><s.icon className="w-3.5 h-3.5" />{s.label}</div>
-            <div className={`text-lg font-bold mt-1 ${s.pnl ? (s.value >= 0 ? 'text-emerald-600' : 'text-rose-600') : 'text-slate-800'}`}>
+          <div key={s.label} className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm">
+            <div className="flex items-center gap-2 text-xs text-slate-400"><s.icon className="w-3.5 h-3.5" />{s.label}</div>
+            <div className={`text-xl font-bold mt-3 ${s.pnl ? (s.value >= 0 ? 'text-emerald-600' : 'text-rose-600') : 'text-slate-900'}`}>
               {s.pnl && s.value >= 0 ? '+' : ''}{money(s.value)}
             </div>
           </div>
         ))}
       </div>
       <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
-        <h3 className="font-bold text-slate-800 px-5 py-3 border-b border-slate-100">Open positions</h3>
-        {data.positions.length === 0 ? <p className="px-5 py-6 text-sm text-slate-400">No open positions.</p> : (
-          <div className="divide-y divide-slate-100">
-            {data.positions.map((p) => (
-              <button key={p.outcome_id} onClick={() => ctx.openMarket(p.market_id)} className="w-full text-left px-5 py-3 hover:bg-slate-50 flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="text-sm font-medium text-slate-700 truncate">{p.question}</div>
-                  <div className="text-xs text-slate-400">{nf.format(p.shares)} × {p.outcome_label} @ {pct1(p.avg_price)} → {pct1(p.cur_price)}</div>
-                </div>
-                <div className="text-right shrink-0">
-                  <div className="text-sm font-semibold text-slate-800">{money(p.value)}</div>
-                  <div className={`text-xs font-medium ${p.unrealized_pnl >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{p.unrealized_pnl >= 0 ? '+' : ''}{money(p.unrealized_pnl)}</div>
-                </div>
-              </button>
-            ))}
+        <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between gap-3">
+          <div>
+            <h3 className="font-bold text-slate-800">Open positions</h3>
+            <p className="text-sm text-slate-500">Tap to open the market and manage your exposure.</p>
+          </div>
+          <span className="text-sm text-slate-400">{data.positions.length} entries</span>
+        </div>
+        {data.positions.length === 0 ? <p className="px-5 py-10 text-sm text-slate-400">No open positions.</p> : (
+          <div className="overflow-x-auto">
+            <div className="min-w-[680px] divide-y divide-slate-100">
+              {data.positions.map((p) => (
+                <button key={p.outcome_id} onClick={() => ctx.openMarket(p.market_id)} className="w-full text-left px-5 py-4 hover:bg-slate-50 flex items-center justify-between gap-4">
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold text-slate-800 truncate">{p.question}</div>
+                    <div className="mt-1 text-xs text-slate-500">{nf.format(p.shares)} × {p.outcome_label} @ {pct1(p.avg_price)} → {pct1(p.cur_price)}</div>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <div className="text-sm font-semibold text-slate-900">{money(p.value)}</div>
+                    <div className={`text-xs font-medium ${p.unrealized_pnl >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{p.unrealized_pnl >= 0 ? '+' : ''}{money(p.unrealized_pnl)}</div>
+                  </div>
+                </button>
+              ))}
+            </div>
           </div>
         )}
       </div>
       {trades.length > 0 && (
         <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
-          <h3 className="font-bold text-slate-800 px-5 py-3 border-b border-slate-100">Recent activity</h3>
-          <div className="divide-y divide-slate-100">
-            {trades.slice(0, 12).map((t) => (
-              <div key={t.id} className="px-5 py-2.5 flex items-center justify-between text-sm">
-                <div className="min-w-0">
-                  <span className={`font-semibold capitalize ${t.side === 'buy' ? 'text-emerald-600' : 'text-rose-600'}`}>{t.side}</span>
-                  <span className="text-slate-600"> {nf.format(t.shares)} {t.outcome_label}</span>
-                  <span className="text-slate-400 truncate"> · {t.question}</span>
+          <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between gap-3">
+            <div>
+              <h3 className="font-bold text-slate-800">Recent activity</h3>
+              <p className="text-sm text-slate-500">Latest trades from your account.</p>
+            </div>
+            <span className="text-sm text-slate-400">{trades.length} records</span>
+          </div>
+          <div className="overflow-x-auto">
+            <div className="min-w-[680px] divide-y divide-slate-100">
+              {trades.slice(0, 12).map((t) => (
+                <div key={t.id} className="px-5 py-3 flex items-center justify-between gap-4 text-sm">
+                  <div className="min-w-0">
+                    <span className={`font-semibold capitalize ${t.side === 'buy' ? 'text-emerald-600' : 'text-rose-600'}`}>{t.side}</span>
+                    <span className="text-slate-600"> {nf.format(t.shares)} {t.outcome_label}</span>
+                    <span className="text-slate-400 truncate"> · {t.question}</span>
+                  </div>
+                  <span className="text-slate-500 shrink-0">{pct1(t.price)}</span>
                 </div>
-                <span className="text-slate-500 shrink-0">{pct1(t.price)}</span>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
         </div>
       )}
@@ -768,17 +844,35 @@ function LeaderboardView({ ctx }) {
   useEffect(() => { let a = true; ctx.ds.leaderboard().then((r) => a && setRows(r)).catch(() => a && setRows([])); return () => { a = false; }; }, [ctx.portfolioVersion]);
   if (!rows) return <div className="flex justify-center py-20 text-slate-400"><Spinner className="w-8 h-8" /></div>;
   return (
-    <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden max-w-2xl mx-auto">
-      <h3 className="font-bold text-slate-800 px-5 py-3 border-b border-slate-100 flex items-center gap-2"><Trophy className="w-4 h-4 text-amber-500" /> Leaderboard</h3>
+    <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden max-w-4xl mx-auto">
+      <div className="px-5 py-4 border-b border-slate-100">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="space-y-1">
+            <div className="inline-flex items-center gap-2 text-sm text-slate-500">
+              <Trophy className="w-4 h-4 text-amber-500" />
+              <span>Leaderboard</span>
+            </div>
+            <h3 className="text-2xl font-bold text-slate-900">Top traders</h3>
+          </div>
+          <p className="text-sm text-slate-500 max-w-xl">See the highest net worth traders and their realized profits. The list updates as trades happen.</p>
+        </div>
+      </div>
       <div className="divide-y divide-slate-100">
         {rows.map((r, i) => (
-          <div key={r.id} className="px-5 py-3 flex items-center gap-3">
-            <span className={`w-6 text-center font-bold ${i < 3 ? 'text-amber-500' : 'text-slate-300'}`}>{i + 1}</span>
-            <Avatar user={r} />
-            <span className="font-medium text-slate-700 flex-1">{r.name}{r.is_bot && <span className="text-xs text-slate-400 ml-1">bot</span>}</span>
-            <div className="text-right">
-              <div className="font-semibold text-slate-800">{money(r.net_worth)}</div>
-              <div className={`text-xs ${r.profit >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{r.profit >= 0 ? '+' : ''}{money(r.profit)}</div>
+          <div key={r.id} className="px-5 py-4 hover:bg-slate-50 transition-colors">
+            <div className="grid grid-cols-[auto_1fr_auto] items-center gap-4">
+              <span className={`w-8 text-center text-sm font-semibold ${i < 3 ? 'text-amber-500' : 'text-slate-400'}`}>{i + 1}</span>
+              <div className="flex items-center gap-3 min-w-0">
+                <Avatar user={r} />
+                <div className="min-w-0">
+                  <div className="font-semibold text-slate-800 truncate">{r.name}</div>
+                  <div className="text-xs text-slate-500">{r.is_bot ? 'bot trader' : 'human trader'}</div>
+                </div>
+              </div>
+              <div className="text-right">
+                <div className="font-semibold text-slate-800">{money(r.net_worth)}</div>
+                <div className={`text-xs ${r.profit >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{r.profit >= 0 ? '+' : ''}{money(r.profit)}</div>
+              </div>
             </div>
           </div>
         ))}
@@ -799,6 +893,9 @@ function CreateMarketModal({ ctx, open, onClose }) {
     setBusy(true);
     try {
       const m = await ctx.ds.createMarket({ ...f, liquidity_param: Number(f.liquidity_param), close_date: new Date(close).toISOString(), outcomes: f.type === 'categorical' ? outcomes : [] });
+      if (typeof m.balance === 'number') {
+        ctx.setUserBalance(m.balance, m.realized_pnl);
+      }
       ctx.toast('success', 'Market created'); onClose(); ctx.openMarket(m.id);
     } catch (e) { ctx.toast('error', e.message); }
     finally { setBusy(false); }
@@ -938,8 +1035,15 @@ export default function App() {
       applyPrices(e.market_id, e.prices, e.volume);
       setDetail((d) => {
         if (!d || d.id !== e.market_id) return d;
-        const trades = [e.trade, ...(d.recent_trades || [])].slice(0, 20);
-        const history = [...(d.history || []), { t: e.trade?.created_at || new Date().toISOString(), values: e.prices.map((p) => p.price) }].slice(-200);
+        const existing = d.recent_trades || [];
+        const trades = e.trade && !existing.some((t) => t.id === e.trade.id)
+          ? [e.trade, ...existing].slice(0, 20)
+          : existing;
+        const latestHistory = d.history?.[d.history.length - 1];
+        const nextPoint = { t: e.trade?.created_at || new Date().toISOString(), values: e.prices.map((p) => p.price) };
+        const history = latestHistory?.t === nextPoint.t
+          ? d.history
+          : [...(d.history || []), nextPoint].slice(-200);
         return { ...d, recent_trades: trades, history };
       });
     } else if (e.type === 'market_resolved') {
@@ -993,51 +1097,72 @@ export default function App() {
     <div className="min-h-screen bg-slate-50 text-slate-900" style={{ fontFamily: 'ui-sans-serif, system-ui, sans-serif' }}>
       {/* connection banner */}
       {mode === 'demo' && (
-        <div className="bg-amber-500 text-white text-sm px-4 py-2 flex items-center justify-center gap-2 flex-wrap">
+        <div className="bg-amber-500 text-white text-sm px-4 py-3 flex items-center justify-center gap-3 flex-wrap">
           <WifiOff className="w-4 h-4" /> Backend not reachable — running on in-browser demo data with live LMSR math.
-          <button onClick={() => { setMode('connecting'); http('/config', { timeout: 2500 }).then(() => setMode('live')).catch(() => setMode('demo')); }} className="underline font-medium">Retry connection</button>
+          <span className="rounded-full bg-white/15 px-2 py-0.5 text-[0.75rem] font-semibold">
+            {backendAccessMode}
+          </span>
+          <button onClick={() => { setMode('connecting'); http('/config', { timeout: 2500 }).then(() => setMode('live')).catch(() => setMode('demo')); }} className="underline font-semibold">Retry connection</button>
         </div>
       )}
 
-      <header className="sticky top-0 z-30 bg-white/90 backdrop-blur border-b border-slate-200">
-        <div className="max-w-6xl mx-auto px-4 h-14 flex items-center gap-3">
-          <button onClick={() => setView({ name: 'markets' })} className="flex items-center gap-2 font-bold text-slate-800">
-            <div className="w-8 h-8 rounded-xl bg-indigo-500 flex items-center justify-center text-white"><Sparkles className="w-4 h-4" /></div>
-            ForeCast
-          </button>
-          <nav className="hidden sm:flex items-center gap-1 ml-2">
+      <header className="sticky top-0 z-30 bg-white/95 backdrop-blur border-b border-slate-200 header-shadow">
+        <div className="max-w-7xl mx-auto px-4 py-3 flex flex-wrap items-center gap-3 justify-between min-w-0">
+          <div className="flex flex-wrap items-center gap-2 min-w-0">
+            <button onClick={() => setView({ name: 'markets' })} className="flex items-center gap-2 font-bold text-slate-800 min-w-0">
+              <div className="w-8 h-8 rounded-xl bg-indigo-500 flex items-center justify-center text-white"><Sparkles className="w-4 h-4" /></div>
+              ForeCast
+            </button>
+            {mode !== 'connecting' && (
+              <span className={`inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-semibold ${mode === 'live' ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>
+                {mode === 'live' ? <><Wifi className="w-3.5 h-3.5" /> Live</> : <><WifiOff className="w-3.5 h-3.5" /> Demo</>}
+              </span>
+            )}
+            <span className="inline-flex max-w-full items-center gap-1 rounded-full bg-slate-100 px-3 py-1 text-[0.65rem] text-slate-600 break-words whitespace-normal" title={API_BASE}>
+              API host: {API_BASE.replace(/^https?:\/\//, '')}
+              <span className={`ml-2 rounded-full px-2 py-0.5 text-[0.65rem] font-semibold ${usingDevProxy ? 'bg-indigo-50 text-indigo-600' : 'bg-slate-200 text-slate-600'}`}>
+                {backendAccessMode}
+              </span>
+            </span>
+          </div>
+          <nav className="hidden sm:flex items-center gap-2 ml-2">
             {[['markets', 'Markets', TrendingUp], ['portfolio', 'Portfolio', Wallet], ['leaderboard', 'Leaderboard', Trophy]].map(([k, label, Icon]) => (
-              <button key={k} onClick={() => setView({ name: k })} className={`px-3 py-1.5 rounded-lg text-sm font-medium flex items-center gap-1.5 ${view.name === k ? 'bg-slate-100 text-slate-800' : 'text-slate-500 hover:text-slate-700'}`}>
+              <button key={k} onClick={() => setView({ name: k })} className={`px-4 py-2 rounded-2xl text-sm font-medium flex items-center gap-2 ${view.name === k ? 'bg-slate-100 text-slate-800' : 'text-slate-500 hover:text-slate-700'}`}>
                 <Icon className="w-4 h-4" />{label}
               </button>
             ))}
           </nav>
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ml-auto flex flex-1 min-w-0 flex-wrap items-center justify-end gap-2">
             {mode === 'live' && <span className="hidden sm:inline-flex items-center gap-1 text-xs text-emerald-600"><Wifi className="w-3.5 h-3.5" />{rt.status === 'open' ? 'live' : 'connecting'}</span>}
-            <button onClick={() => setCreateOpen(true)} className="px-3 py-1.5 rounded-lg bg-indigo-500 text-white text-sm font-medium flex items-center gap-1 hover:bg-indigo-600"><Plus className="w-4 h-4" /><span className="hidden sm:inline">New</span></button>
+            <button onClick={() => setCreateOpen(true)} className="px-4 py-2 rounded-2xl bg-indigo-500 text-white text-sm font-medium flex items-center gap-2 hover:bg-indigo-600 shadow-sm small-nav-button"><Plus className="w-4 h-4" /><span className="hidden sm:inline">New</span></button>
             {user ? (
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 min-w-0">
                 <span className="hidden sm:inline-flex"><Money value={user.balance} className="text-sm font-semibold text-slate-700" /></span>
                 <Avatar user={user} />
                 <button onClick={logout} className="text-slate-400 hover:text-slate-600"><LogOut className="w-4 h-4" /></button>
               </div>
             ) : (
-              <button onClick={() => setAuthOpen(true)} className="px-3 py-1.5 rounded-lg border border-slate-200 text-sm font-medium flex items-center gap-1"><LogIn className="w-4 h-4" />Sign in</button>
+              <button onClick={() => setAuthOpen(true)} className="px-4 py-2 rounded-2xl border border-slate-200 text-sm font-medium flex items-center gap-2 small-nav-button"><LogIn className="w-4 h-4" />Sign in</button>
             )}
           </div>
         </div>
-        <nav className="sm:hidden flex border-t border-slate-100">
-          {[['markets', 'Markets'], ['portfolio', 'Portfolio'], ['leaderboard', 'Leaders']].map(([k, label]) => (
-            <button key={k} onClick={() => setView({ name: k })} className={`flex-1 py-2 text-sm font-medium ${view.name === k ? 'text-indigo-600 border-b-2 border-indigo-500' : 'text-slate-500'}`}>{label}</button>
+        <nav className="sm:hidden flex border-t border-slate-100 bg-white overflow-x-auto">
+          {[['markets', 'Markets', TrendingUp], ['portfolio', 'Portfolio', Wallet], ['leaderboard', 'Leaders', Trophy]].map(([k, label, Icon]) => (
+            <button key={k} onClick={() => setView({ name: k })} className={`flex-1 min-w-[84px] py-2.5 text-xs font-semibold inline-flex flex-col items-center justify-center gap-1 ${view.name === k ? 'text-indigo-600 border-b-2 border-indigo-500 bg-indigo-50' : 'text-slate-500 hover:text-slate-700'}`}>
+              <Icon className="w-4 h-4" />
+              <span className="leading-none">{label}</span>
+            </button>
           ))}
         </nav>
       </header>
 
-      <main className="max-w-6xl mx-auto px-4 py-6">
+      <main className="max-w-7xl mx-auto px-4 py-10">
         {mode === 'connecting' ? (
           <div className="flex flex-col items-center py-24 text-slate-400 gap-3"><Spinner className="w-8 h-8" /><span className="text-sm">Connecting to backend…</span></div>
         ) : view.name === 'markets' ? (
-          <MarketsView ctx={ctx} markets={markets} loading={loadingMarkets} filters={filters} setFilters={setFilters} />
+          <div className="panel-card p-6">
+            <MarketsView ctx={ctx} markets={markets} loading={loadingMarkets} filters={filters} setFilters={setFilters} />
+          </div>
         ) : view.name === 'market' ? (
           <MarketDetailView ctx={ctx} detail={detail} onBack={() => setView({ name: 'markets' })} />
         ) : view.name === 'portfolio' ? (

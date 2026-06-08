@@ -1,12 +1,13 @@
 # app/crud.py
 from __future__ import annotations
+import math
 from datetime import datetime
 from fastapi import HTTPException
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from . import models
 from .models import Market, Outcome, Position, Trade, PricePoint, User, utcnow
-from .lmsr import lmsr_prices, cost_to_trade
+from .lmsr import lmsr_prices, cost_to_trade, lmsr_cost
 
 EPS = 1e-9
 
@@ -172,12 +173,32 @@ async def resolve_market(db: AsyncSession, market_id: str, winning_outcome_id: s
         d[0] += payout
         d[1] += payout - p.shares * p.avg_price
 
+    shares = [o.shares_outstanding for o in outcomes]
+    b = market.liquidity_param
+    creator_collateral = b * math.log(len(shares))
+    winner_idx = next((i for i, o in enumerate(outcomes) if o.id == winning_outcome_id), -1)
+    winning_shares = shares[winner_idx] if winner_idx >= 0 else 0.0
+    maker_refund = lmsr_cost(shares, b) - winning_shares
+    maker_realized = maker_refund - creator_collateral
+
+    creator_updated = False
     for uid in sorted(payouts):  # consistent order -> no resolve/resolve deadlock
         u = (await db.execute(
             select(User).where(User.id == uid).with_for_update()
         )).scalar_one()
         u.balance += payouts[uid][0]
         u.realized_pnl += payouts[uid][1]
+        if uid == market.created_by:
+            u.balance += maker_refund
+            u.realized_pnl += maker_realized
+            creator_updated = True
+
+    if not creator_updated:
+        creator = (await db.execute(
+            select(User).where(User.id == market.created_by).with_for_update()
+        )).scalar_one()
+        creator.balance += maker_refund
+        creator.realized_pnl += maker_realized
 
     await db.execute(delete(Position).where(Position.market_id == market_id))
     market.status = "resolved"
@@ -193,4 +214,6 @@ async def resolve_market(db: AsyncSession, market_id: str, winning_outcome_id: s
             {"outcome_id": o.id, "label": o.label, "price": final[i]}
             for i, o in enumerate(outcomes)
         ],
+        "maker_refund": maker_refund,
+        "maker_realized": maker_realized,
     }
