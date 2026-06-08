@@ -1,0 +1,10 @@
+# requirements.txt
+fastapi>=0.110
+uvicorn[standard]>=0.29
+sqlalchemy>=2.0
+asyncpg>=0.29
+python-jose[cryptography]>=3.3
+bcrypt>=4.1
+pydantic>=2.6
+pydantic-settings>=2.2
+python-multipart>=0.0.9
