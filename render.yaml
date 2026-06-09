@@ -2,10 +2,8 @@ services:
   - type: web
     name: forecast-backend
     env: python
-    path: forecast-backend
-    branch: main
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    buildCommand: pip install -r forecast-backend/requirements.txt
+    startCommand: uvicorn forecast-backend.app.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: DATABASE_URL
         fromDatabase:
@@ -26,10 +24,8 @@ services:
   - type: web
     name: forecast-frontend
     env: static
-    buildCommand: npm ci && npm run build
-    staticPublishPath: dist
-    path: forecast-frontend
-    branch: main
+    buildCommand: cd forecast-frontend && npm ci && npm run build
+    staticPublishPath: forecast-frontend/dist
     envVars:
       - key: VITE_API_BASE
         value: https://forecast-backend.onrender.com/api
