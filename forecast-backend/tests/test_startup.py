@@ -1,6 +1,8 @@
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from fastapi.testclient import TestClient
+
 from app.config import Settings
 from app.main import app, health, initialize_database
 
@@ -25,3 +27,16 @@ class TestDatabaseStartup(unittest.IsolatedAsyncioTestCase):
         settings = Settings(database_url="postgres://user:pass@host:5432/db")
 
         self.assertEqual(settings.database_url, "postgresql+asyncpg://user:pass@host:5432/db")
+
+    def test_cors_allows_render_frontend_origin(self):
+        with TestClient(app) as client:
+            response = client.options(
+                "/config",
+                headers={
+                    "Origin": "https://forecast-frontend.onrender.com",
+                    "Access-Control-Request-Method": "GET",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["access-control-allow-origin"], "https://forecast-frontend.onrender.com")

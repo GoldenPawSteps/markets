@@ -20,7 +20,9 @@ services:
       - key: STARTING_BALANCE
         value: "1000"
       - key: CORS_ORIGINS
-        value: https://forecast-frontend.onrender.com
+        value: https://forecast-frontend.onrender.com,https://forecast-frontend-gh1w.onrender.com
+      - key: CORS_ORIGIN_REGEX
+        value: https://.*\.onrender\.com|http://localhost(:\d+)?$
 
   - type: web
     name: forecast-frontend
