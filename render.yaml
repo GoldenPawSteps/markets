@@ -36,4 +36,4 @@ services:
 databases:
   - name: forecast-db
     databaseName: forecast
-    plan: starter
+    plan: free
