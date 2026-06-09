@@ -2,12 +2,13 @@ services:
   - type: web
     name: forecast-backend
     env: python
-    buildCommand: pip install -r forecast-backend/requirements.txt
-    startCommand: uvicorn forecast-backend.app.main:app --host 0.0.0.0 --port $PORT
+    buildCommand: cd forecast-backend && pip install -r requirements.txt
+    startCommand: cd forecast-backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: DATABASE_URL
         fromDatabase:
           name: forecast-db
+          property: connectionString
       - key: JWT_SECRET
         value: replace-this-with-a-long-random-string
       - key: JWT_ALGORITHM
