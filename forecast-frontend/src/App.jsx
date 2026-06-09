@@ -1144,12 +1144,14 @@ export default function App() {
                 {mode === 'live' ? <><Wifi className="w-3.5 h-3.5" /> Live</> : <><WifiOff className="w-3.5 h-3.5" /> Demo</>}
               </span>
             )}
-            <span className="inline-flex max-w-full items-center gap-1 rounded-full bg-slate-100 px-3 py-1 text-[0.65rem] text-slate-600 break-words whitespace-normal" title={API_BASE}>
-              API host: {API_BASE.replace(/^https?:\/\//, '')}
-              <span className={`ml-2 rounded-full px-2 py-0.5 text-[0.65rem] font-semibold ${usingDevProxy ? 'bg-indigo-50 text-indigo-600' : 'bg-slate-200 text-slate-600'}`}>
-                {backendAccessMode}
+            {!import.meta.env.PROD && (
+              <span className="inline-flex max-w-full items-center gap-1 rounded-full bg-slate-100 px-3 py-1 text-[0.65rem] text-slate-600 break-words whitespace-normal" title={API_BASE}>
+                API host: {API_BASE.replace(/^https?:\/\//, '')}
+                <span className={`ml-2 rounded-full px-2 py-0.5 text-[0.65rem] font-semibold ${usingDevProxy ? 'bg-indigo-50 text-indigo-600' : 'bg-slate-200 text-slate-600'}`}>
+                  {backendAccessMode}
+                </span>
               </span>
-            </span>
+            )}
           </div>
           <nav className="hidden sm:flex items-center gap-2 ml-2">
             {[['markets', 'Markets', TrendingUp], ['portfolio', 'Portfolio', Wallet], ['leaderboard', 'Leaderboard', Trophy]].map(([k, label, Icon]) => (
