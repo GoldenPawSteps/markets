@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     enable_bot_simulator: bool = False
     starting_balance: float = 1000.0
     cors_origins: str = "http://localhost:3000,http://localhost:5173"
+    cors_origin_regex: str | None = r"https://.*\.onrender\.com|http://localhost(:\d+)?$"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -33,6 +34,10 @@ class Settings(BaseSettings):
     @property
     def cors_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def cors_origin_regex_value(self) -> str | None:
+        return self.cors_origin_regex.strip() if self.cors_origin_regex else None
 
 
 settings = Settings()
