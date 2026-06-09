@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 60 * 24 * 7
     admin_only_create: bool = False
-    enable_bot_simulator: bool = True
+    enable_bot_simulator: bool = False
     starting_balance: float = 1000.0
     cors_origins: str = "http://localhost:3000,http://localhost:5173"
 

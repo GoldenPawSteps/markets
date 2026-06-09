@@ -68,6 +68,34 @@ cd /workspaces/markets
 make stop
 ```
 
+### Production deployment
+
+1) Copy the backend example environment file:
+
+```bash
+cp forecast-backend/.env.example forecast-backend/.env
+```
+
+2) Build and start the production stack:
+
+```bash
+cd /workspaces/markets
+docker compose -f docker-compose.prod.yml up --build -d
+```
+
+3) Open the production frontend and backend:
+
+- Frontend: `http://localhost`
+- Backend API: `http://localhost:8000`
+- Backend health: `http://localhost:8000/health`
+
+To stop the production stack:
+
+```bash
+cd /workspaces/markets
+docker compose -f docker-compose.prod.yml down
+```
+
 To remove the backend virtual environment and frontend dependencies/build output:
 
 ```bash

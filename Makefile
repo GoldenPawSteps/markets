@@ -2,13 +2,17 @@
 
 help:
 	@echo "Usage: make [target]"
-	@echo "Targets: db setup-backend backend frontend dev stop"
-	@echo "  db           Start the Postgres database container"
+	@echo "Targets: db setup-backend backend frontend dev prod docker-build docker-up docker-down stop"
+	@echo "  db             Start the Postgres database container"
 	@echo "  setup-backend  Create backend venv and install Python dependencies"
-	@echo "  backend      Run the FastAPI backend server"
-	@echo "  frontend     Install the Vite app"
-	@echo "  dev          Start db, backend, and frontend together"
-	@echo "  stop         Stop the Postgres database container"
+	@echo "  backend        Run the FastAPI backend server"
+	@echo "  frontend       Install the Vite app"
+	@echo "  dev            Start db, backend, and frontend together"
+	@echo "  prod           Build and run the production Docker stack"
+	@echo "  docker-build   Build production Docker images"
+	@echo "  docker-up      Start production containers"
+	@echo "  docker-down    Stop production containers"
+	@echo "  stop           Stop the Postgres database container"
 
 DB_DIR := forecast-backend
 FRONTEND_DIR := forecast-frontend
@@ -36,6 +40,17 @@ dev: db
 
 stop:
 	cd $(DB_DIR) && docker compose down
+
+docker-build:
+	docker compose -f docker-compose.prod.yml build
+
+docker-up:
+	docker compose -f docker-compose.prod.yml up -d
+
+docker-down:
+	docker compose -f docker-compose.prod.yml down
+
+prod: docker-build docker-up
 
 clean:
 	rm -rf $(DB_DIR)/.venv

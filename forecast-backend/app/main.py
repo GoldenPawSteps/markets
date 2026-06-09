@@ -4,9 +4,9 @@ import asyncio
 import json
 import random
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select
+from sqlalchemy import select, text
 from . import crud
 from .config import settings
 from .database import engine, AsyncSessionLocal
@@ -57,8 +57,22 @@ async def bot_loop():
             await asyncio.sleep(1)
 
 
+async def wait_for_db(retries: int = 20, delay: float = 1.0):
+    last_error = None
+    for attempt in range(retries):
+        try:
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+                return
+        except Exception as exc:
+            last_error = exc
+            await asyncio.sleep(delay)
+    raise RuntimeError("Could not connect to the database after multiple attempts") from last_error
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await wait_for_db()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     async with AsyncSessionLocal() as db:
@@ -87,6 +101,16 @@ app.include_router(portfolio.router)
 @app.get("/")
 async def root():
     return {"name": "ForeCast API", "status": "ok", "docs": "/docs"}
+
+
+@app.get("/health")
+async def health():
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+    except Exception:
+        raise HTTPException(status_code=503, detail="database unavailable")
+    return {"status": "ok", "database": "connected"}
 
 
 @app.get("/config")
