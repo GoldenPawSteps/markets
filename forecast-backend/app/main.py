@@ -60,7 +60,7 @@ async def bot_loop():
             await asyncio.sleep(1)
 
 
-async def wait_for_db(retries: int = 60, delay: float = 2.0):
+async def wait_for_db(retries: int = 15, delay: float = 1.0):
     last_error = None
     for attempt in range(retries):
         try:
@@ -122,12 +122,16 @@ async def root():
 
 @app.get("/health")
 async def health():
+    if not getattr(app.state, "db_ready", False):
+        return {"status": "ok", "database": "starting", "db_ready": False}
+
     try:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
     except Exception:
-        raise HTTPException(status_code=503, detail="database unavailable")
-    return {"status": "ok", "database": "connected"}
+        return {"status": "ok", "database": "degraded", "db_ready": False}
+
+    return {"status": "ok", "database": "connected", "db_ready": True}
 
 
 @app.get("/config")
