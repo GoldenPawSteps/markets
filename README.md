@@ -102,3 +102,23 @@ To remove the backend virtual environment and frontend dependencies/build output
 cd /workspaces/markets
 make clean
 ```
+
+## Deploy on Render
+
+The repo includes `render.yaml` to define both services and a managed PostgreSQL database.
+
+1) Push your code to the `main` branch.
+2) In Render, create a new service from this repository and select the `render.yaml` manifest.
+3) Render will create:
+   - a Python web service for the backend
+   - a static site for the frontend
+   - a managed PostgreSQL database
+
+The frontend build uses the Render env vars:
+- `VITE_API_BASE` → `https://forecast-backend.onrender.com/api`
+- `VITE_WS_BASE` → `wss://forecast-backend.onrender.com/ws`
+
+The backend service exposes:
+- `http://<your-backend>.onrender.com/health`
+
+If needed, update the Render service names or env vars to match your chosen hostnames.
