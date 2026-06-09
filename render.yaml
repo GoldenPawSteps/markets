@@ -8,6 +8,7 @@ services:
       - key: DATABASE_URL
         fromDatabase:
           name: forecast-db
+          property: connectionString
       - key: JWT_SECRET
         value: replace-this-with-a-long-random-string
       - key: JWT_ALGORITHM
