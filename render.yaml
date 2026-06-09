@@ -35,5 +35,4 @@ services:
 databases:
   - name: forecast-db
     databaseName: forecast
-    userName: postgres
     plan: starter
