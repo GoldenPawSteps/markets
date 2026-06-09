@@ -2,6 +2,7 @@
 from __future__ import annotations
 import asyncio
 import json
+import logging
 import random
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -14,6 +15,8 @@ from .models import Base, Market, Outcome, User, utcnow
 from .seed import seed_if_empty
 from .ws import manager
 from .routers import auth, markets, trades, portfolio
+
+logger = logging.getLogger(__name__)
 
 
 async def bot_loop():
@@ -57,7 +60,7 @@ async def bot_loop():
             await asyncio.sleep(1)
 
 
-async def wait_for_db(retries: int = 20, delay: float = 1.0):
+async def wait_for_db(retries: int = 60, delay: float = 2.0):
     last_error = None
     for attempt in range(retries):
         try:
@@ -70,13 +73,27 @@ async def wait_for_db(retries: int = 20, delay: float = 1.0):
     raise RuntimeError("Could not connect to the database after multiple attempts") from last_error
 
 
+async def initialize_database() -> bool:
+    try:
+        await wait_for_db()
+    except Exception as exc:
+        logger.warning("Database not available during startup; continuing without initialization: %s", exc)
+        return False
+
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        async with AsyncSessionLocal() as db:
+            await seed_if_empty(db)
+        return True
+    except Exception as exc:
+        logger.warning("Database initialization failed during startup: %s", exc)
+        return False
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await wait_for_db()
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    async with AsyncSessionLocal() as db:
-        await seed_if_empty(db)
+    app.state.db_ready = await initialize_database()
     task = asyncio.create_task(bot_loop()) if settings.enable_bot_simulator else None
     yield
     if task:
