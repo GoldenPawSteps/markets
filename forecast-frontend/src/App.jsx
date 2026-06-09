@@ -11,7 +11,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 
 /* ============================ Config ============================ */
 // Point these at your FastAPI server. The Vite dev server proxies /api and /ws to backend localhost:8000.
-// Production still defaults to the browser hostname on port 8000 unless overridden.
+// Production can use either the backend root URL or an /api prefix, and the client will fall back automatically.
 const defaultApiHost = (() => {
   if (typeof window === 'undefined') return 'http://localhost:8000';
   if (import.meta.env.DEV) return '/api';
@@ -104,30 +104,56 @@ function localQuote(market, outcomeId, side, qty, balance, held) {
 const qs = (o) => Object.entries(o).filter(([, v]) => v !== undefined && v !== null && v !== '')
   .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
 
-async function http(path, { method = 'GET', body, headers = {}, timeout = 8000 } = {}) {
+function getApiBaseCandidates(base) {
+  const candidates = [];
+  if (base) candidates.push(base);
+  if (base && base.endsWith('/api')) candidates.push(base.replace(/\/api$/, ''));
+  return Array.from(new Set(candidates));
+}
+
+async function requestJson(path, { method = 'GET', body, headers = {}, timeout = 8000, parseJson = true, form = false } = {}) {
   const ctrl = new AbortController();
   const id = setTimeout(() => ctrl.abort(), timeout);
+  const bases = getApiBaseCandidates(API_BASE);
+  let lastError = null;
   try {
-    const res = await fetch(API_BASE + path, {
-      method,
-      headers: { 'Content-Type': 'application/json', ...headers },
-      body: body ? JSON.stringify(body) : undefined,
-      signal: ctrl.signal,
-    });
-    const text = await res.text();
-    const data = text ? JSON.parse(text) : null;
-    if (!res.ok) throw new Error((data && (data.detail || data.message)) || `HTTP ${res.status}`);
-    return data;
+    for (const base of bases) {
+      try {
+        const res = await fetch(base + path, {
+          method,
+          headers: form ? { ...headers } : { 'Content-Type': 'application/json', ...headers },
+          body: body ? (form ? body : JSON.stringify(body)) : undefined,
+          signal: ctrl.signal,
+        });
+        const text = await res.text();
+        const data = parseJson && text ? JSON.parse(text) : text;
+        if (!res.ok) {
+          if (res.status === 404 && base !== bases[bases.length - 1]) continue;
+          throw new Error((data && (data.detail || data.message)) || `HTTP ${res.status}`);
+        }
+        return data;
+      } catch (error) {
+        lastError = error;
+        if (base === bases[bases.length - 1]) break;
+      }
+    }
   } finally { clearTimeout(id); }
+  throw lastError || new Error('Request failed');
 }
+
+async function http(path, { method = 'GET', body, headers = {}, timeout = 8000 } = {}) {
+  return requestJson(path, { method, body, headers, timeout, parseJson: true });
+}
+
 async function loginHttp(username, password) {
-  const res = await fetch(API_BASE + '/auth/login', {
-    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ username, password }),
+  const body = new URLSearchParams({ username, password });
+  return requestJson('/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+    parseJson: true,
+    form: true,
   });
-  const data = await res.json().catch(() => null);
-  if (!res.ok) throw new Error((data && data.detail) || 'Login failed');
-  return data;
 }
 
 /* ============================ Demo data + engine ============================ */
