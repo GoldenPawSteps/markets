@@ -23,12 +23,13 @@ services:
       - key: CORS_ORIGINS
         value: https://forecast-frontend.onrender.com
 
-  - type: static_site
+  - type: web
     name: forecast-frontend
+    env: static
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
     path: forecast-frontend
     branch: main
-    buildCommand: npm ci && npm run build
-    publishPath: dist
     envVars:
       - key: VITE_API_BASE
         value: https://forecast-backend.onrender.com/api
