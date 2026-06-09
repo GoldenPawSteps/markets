@@ -29,9 +29,9 @@ services:
     staticPublishPath: forecast-frontend/dist
     envVars:
       - key: VITE_API_BASE
-        value: https://forecast-backend.onrender.com
+        value: https://forecast-backend-gh1w.onrender.com
       - key: VITE_WS_BASE
-        value: wss://forecast-backend.onrender.com/ws
+        value: wss://forecast-backend-gh1w.onrender.com/ws
 
 databases:
   - name: forecast-db
