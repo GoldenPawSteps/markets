@@ -8,6 +8,7 @@ import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
 } from 'recharts';
 import { motion, AnimatePresence } from 'framer-motion';
+import { LANGUAGE_LABELS, SUPPORTED_LANGUAGES, getInitialLanguage, translate } from './i18n';
 
 /* ============================ Config ============================ */
 // Point these at your FastAPI server. The Vite dev server proxies /api and /ws to backend localhost:8000.
@@ -78,20 +79,20 @@ function maxAffordable(shares, b, idx, budget) {
   for (let i = 0; i < 50; i++) { const mid = (lo + hi) / 2; if (costToTrade(shares, b, idx, mid) <= budget) lo = mid; else hi = mid; }
   return Math.floor(lo);
 }
-function localQuote(market, outcomeId, side, qty, balance, held) {
+function localQuote(market, outcomeId, side, qty, balance, held, t) {
   const shares = market.outcomes.map((o) => o.shares_outstanding);
   const b = market.liquidity_param;
   const idx = market.outcomes.findIndex((o) => o.id === outcomeId);
   const cur = lmsrPrices(shares, b)[idx];
-  if (!qty || qty <= 0) return { shares: 0, side, cur_price: cur, error: 'Enter a quantity' };
+  if (!qty || qty <= 0) return { shares: 0, side, cur_price: cur, error: t?.('enterQuantity') || 'Enter a quantity' };
   const delta = side === 'buy' ? qty : -qty;
   const cost = costToTrade(shares, b, idx, delta);
   const after = shares.slice(); after[idx] += delta;
   const newPrice = lmsrPrices(after, b)[idx];
   const abscost = Math.abs(cost);
   let error = null;
-  if (side === 'buy' && cost > (balance ?? Infinity) + 1e-9) error = 'Insufficient balance';
-  if (side === 'sell' && qty > (held ?? 0) + 1e-9) error = 'Not enough shares';
+  if (side === 'buy' && cost > (balance ?? Infinity) + 1e-9) error = t?.('insufficientBalance') || 'Insufficient balance';
+  if (side === 'sell' && qty > (held ?? 0) + 1e-9) error = t?.('notEnoughShares') || 'Not enough shares';
   return {
     shares: qty, side, cur_price: cur, new_price: newPrice, avg_price: abscost / qty,
     cost: abscost, proceeds: side === 'sell' ? -cost : 0,
@@ -103,6 +104,18 @@ function localQuote(market, outcomeId, side, qty, balance, held) {
 /* ============================ HTTP client ============================ */
 const qs = (o) => Object.entries(o).filter(([, v]) => v !== undefined && v !== null && v !== '')
   .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
+
+function getErrorMessage(error, t) {
+  const msg = error?.message || error?.detail || '';
+  const lower = String(msg).toLowerCase();
+  if (lower.includes('insufficient balance')) return t?.('insufficientBalance') || 'Insufficient balance';
+  if (lower.includes('not enough shares')) return t?.('notEnoughShares') || 'Not enough shares';
+  if (lower.includes('market not found')) return t?.('marketNotFound') || 'Market not found';
+  if (lower.includes('market is not open')) return t?.('marketNotOpen') || 'Market is not open';
+  if (lower.includes('enter a quantity')) return t?.('enterQuantity') || 'Enter a quantity';
+  if (lower.includes('request failed')) return t?.('requestFailed') || 'Request failed';
+  return msg || (t?.('requestFailed') || 'Request failed');
+}
 
 function getApiBaseCandidates(base) {
   const candidates = [];
@@ -239,10 +252,10 @@ function marketOut(m, detail = false) {
   if (!detail) return base;
   return { ...base, resolution_criteria: m.resolution_criteria, creator: { id: m.created_by, name: (demoState.users[m.created_by] || {}).name }, history: m.history.slice(-200), recent_trades: m.recent_trades.slice(0, 20), comments: m.comments.slice() };
 }
-function demoTrade(userId, marketId, outcomeId, side, qty) {
+function demoTrade(userId, marketId, outcomeId, side, qty, t) {
   const m = demoState.markets.find((x) => x.id === marketId);
-  if (!m) throw new Error('Market not found');
-  if (statusOf(m) !== 'open') throw new Error('Market is not open');
+  if (!m) throw new Error(t?.('marketNotFound') || 'Market not found');
+  if (statusOf(m) !== 'open') throw new Error(t?.('marketNotOpen') || 'Market is not open');
   const u = demoState.users[userId];
   const shares = m.outcomes.map((o) => o.shares_outstanding);
   const b = m.liquidity_param; const idx = m.outcomes.findIndex((o) => o.id === outcomeId);
@@ -250,8 +263,8 @@ function demoTrade(userId, marketId, outcomeId, side, qty) {
   const held = pos ? pos.shares : 0;
   const delta = side === 'buy' ? qty : -qty;
   const cost = costToTrade(shares, b, idx, delta);
-  if (side === 'buy' && cost > u.balance + 1e-9) throw new Error('Insufficient balance');
-  if (side === 'sell' && qty > held + 1e-9) throw new Error('Not enough shares to sell');
+  if (side === 'buy' && cost > u.balance + 1e-9) throw new Error(t?.('insufficientBalance') || 'Insufficient balance');
+  if (side === 'sell' && qty > held + 1e-9) throw new Error(t?.('notEnoughShares') || 'Not enough shares');
   m.outcomes[idx].shares_outstanding += delta;
   const perShare = Math.abs(cost) / qty;
   if (side === 'buy') {
@@ -274,8 +287,8 @@ function demoTrade(userId, marketId, outcomeId, side, qty) {
   demoEmitter.emit({ type: 'market_update', market_id: marketId, prices: pricesPayload, volume: m.volume, trade: tr });
   return { trade: tr, prices: pricesPayload, balance: u.balance, realized_pnl: u.realized_pnl, market_volume: m.volume, position: pos ? { outcome_id: outcomeId, shares: pos.shares, avg_price: pos.avg_price } : null };
 }
-function demoResolve(marketId, winId) {
-  const m = demoState.markets.find((x) => x.id === marketId); if (!m) throw new Error('Market not found');
+function demoResolve(marketId, winId, t) {
+  const m = demoState.markets.find((x) => x.id === marketId); if (!m) throw new Error(t?.('marketNotFound') || 'Market not found');
   demoState.positions.filter((p) => p.market_id === marketId).forEach((p) => {
     const u = demoState.users[p.user_id]; const payout = p.outcome_id === winId ? p.shares : 0;
     u.balance += payout; u.realized_pnl += payout - p.shares * p.avg_price;
@@ -302,7 +315,7 @@ function startDemoBots() {
 }
 
 /* ============================ Data sources ============================ */
-function makeLiveDS(token) {
+function makeLiveDS(token, t) {
   const auth = token ? { Authorization: `Bearer ${token}` } : {};
   return {
     mode: 'live',
@@ -310,7 +323,7 @@ function makeLiveDS(token) {
     getMarket: (id) => http(`/markets/${id}`),
     quote: async ({ market, outcome_id, side, shares, balance, held }) => {
       if (token) { try { return await http(`/markets/${market.id}/quote?${qs({ outcome_id, side, shares })}`, { headers: auth }); } catch { /* fall back */ } }
-      return localQuote(market, outcome_id, side, shares, balance, held);
+      return localQuote(market, outcome_id, side, shares, balance, held, t);
     },
     trade: (b) => http('/trades', { method: 'POST', body: b, headers: auth }),
     resolve: (id, winning_outcome_id) => http(`/markets/${id}/resolve`, { method: 'POST', body: { winning_outcome_id }, headers: auth }),
@@ -322,7 +335,7 @@ function makeLiveDS(token) {
     me: () => http('/auth/me', { headers: auth }),
   };
 }
-function makeDemoDS(userId) {
+function makeDemoDS(userId, t) {
   const filt = (p) => {
     let list = demoState.markets.map((m) => marketOut(m));
     if (p.status) list = list.filter((m) => m.status === p.status);
@@ -334,10 +347,10 @@ function makeDemoDS(userId) {
   return {
     mode: 'demo',
     listMarkets: async (p) => filt(p),
-    getMarket: async (id) => { const m = demoState.markets.find((x) => x.id === id); if (!m) throw new Error('Market not found'); return marketOut(m, true); },
-    quote: async ({ market, outcome_id, side, shares, balance, held }) => localQuote(market, outcome_id, side, shares, balance, held),
-    trade: async (b) => demoTrade(userId, b.market_id, b.outcome_id, b.side, b.shares),
-    resolve: async (id, win) => demoResolve(id, win),
+    getMarket: async (id) => { const m = demoState.markets.find((x) => x.id === id); if (!m) throw new Error(t?.('marketNotFound') || 'Market not found'); return marketOut(m, true); },
+    quote: async ({ market, outcome_id, side, shares, balance, held }) => localQuote(market, outcome_id, side, shares, balance, held, t),
+    trade: async (b) => demoTrade(userId, b.market_id, b.outcome_id, b.side, b.shares, t),
+    resolve: async (id, win) => demoResolve(id, win, t),
     addComment: async (id, text) => {
       const m = demoState.markets.find((x) => x.id === id); const u = demoState.users[userId];
       const c = { id: makeId(), text, created_at: new Date().toISOString(), user: { name: u.name, avatar: u.avatar, color: u.color } };
@@ -370,7 +383,7 @@ function makeDemoDS(userId) {
       const u = demoState.users[userId];
       const collateral = b.liquidity_param * Math.log(labels.length);
       if (collateral > u.balance + 1e-9) {
-        throw new Error('Insufficient balance');
+        throw new Error(t?.('insufficientBalance') || 'Insufficient balance');
       }
       u.balance -= collateral;
       const m = { id: makeId(), question: b.question, description: b.description || '', category: b.category, type: b.type, liquidity_param: b.liquidity_param, resolution_criteria: b.resolution_criteria || '', created_by: userId, created_at: new Date().toISOString(), close_date: b.close_date, volume: 0, status: 'open', resolved_outcome_id: null, outcomes, history: [{ t: new Date().toISOString(), values: labels.map(() => 1 / labels.length) }], recent_trades: [], comments: [] };
@@ -409,9 +422,9 @@ function useRealtime(mode, handlerRef) {
 
 /* ============================ Small UI atoms ============================ */
 const Spinner = ({ className = 'w-5 h-5' }) => <Loader2 className={`animate-spin ${className}`} />;
-function Badge({ status }) {
+function Badge({ status, t }) {
   const map = { open: 'bg-emerald-100 text-emerald-700', closed: 'bg-amber-100 text-amber-700', resolved: 'bg-slate-200 text-slate-600' };
-  const label = { open: 'Open', closed: 'Closed', resolved: 'Resolved' }[status];
+  const label = { open: t?.('open') || 'Open', closed: t?.('closed') || 'Closed', resolved: t?.('resolved') || 'Resolved' }[status];
   return <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${map[status]}`}>{label}</span>;
 }
 function Avatar({ user, size = 'w-8 h-8' }) {
@@ -440,7 +453,7 @@ function Modal({ open, onClose, children, title }) {
 }
 
 /* ============================ Chart ============================ */
-function PriceChart({ market, history }) {
+function PriceChart({ market, history, t }) {
   const colorFor = (label) => {
     if (market.type === 'binary') return label === 'Yes' ? '#10b981' : '#ef4444';
     return LINE_COLORS[market.outcomes.findIndex((o) => o.label === label) % LINE_COLORS.length];
@@ -451,7 +464,7 @@ function PriceChart({ market, history }) {
   const data = (history || []).map((h) => {
     const row = { t: h.t }; market.outcomes.forEach((o, i) => { row[o.label] = +(h.values[i] * 100).toFixed(1); }); return row;
   });
-  if (!data.length) return <div className="h-72 flex items-center justify-center text-slate-400 text-sm">No price history yet</div>;
+  if (!data.length) return <div className="h-72 flex items-center justify-center text-slate-400 text-sm">{t?.('noPriceHistory') || 'No price history yet'}</div>;
   return (
     <div className="h-72 w-full">
       <ResponsiveContainer width="100%" height="100%">
@@ -468,14 +481,14 @@ function PriceChart({ market, history }) {
 }
 
 /* ============================ Market card + list ============================ */
-function MarketCard({ market, onOpen }) {
+function MarketCard({ market, onOpen, t }) {
   const top = [...market.outcomes].sort((a, b) => b.price - a.price).slice(0, market.type === 'binary' ? 2 : 3);
   return (
     <motion.button layout onClick={() => onOpen(market.id)} whileHover={{ y: -3 }}
       className="group market-card text-left bg-white rounded-3xl border border-slate-200 p-5 hover:shadow-xl transition-all duration-200 flex flex-col gap-4">
       <div className="flex items-start justify-between gap-2">
         <span className="text-xs font-medium text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full">{market.category}</span>
-        <Badge status={market.status} />
+        <Badge status={market.status} t={t} />
       </div>
       <h3 className="font-semibold text-slate-800 leading-snug line-clamp-2">{market.question}</h3>
       <div className="flex flex-col gap-1.5 mt-auto">
@@ -494,46 +507,46 @@ function MarketCard({ market, onOpen }) {
       </div>
       <div className="flex items-center justify-between text-xs text-slate-400 pt-1 border-t border-slate-100">
         <span className="inline-flex items-center gap-1"><Activity className="w-3 h-3" /> Vol {money(market.volume)}</span>
-        <span className="inline-flex items-center gap-1"><Clock className="w-3 h-3" /> {market.status === 'resolved' ? 'Settled' : fromNow(market.close_date)}</span>
+        <span className="inline-flex items-center gap-1"><Clock className="w-3 h-3" /> {market.status === 'resolved' ? t?.('settled') || 'Settled' : fromNow(market.close_date)}</span>
       </div>
     </motion.button>
   );
 }
 
-function MarketsView({ ctx, markets, loading, filters, setFilters }) {
+function MarketsView({ ctx, markets, loading, filters, setFilters, t }) {
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
         <div className="max-w-2xl">
-          <p className="text-xs uppercase tracking-[0.3em] text-indigo-600 font-semibold">Markets</p>
-          <h2 className="mt-3 text-3xl font-bold tracking-tight text-slate-900">Trade event outcomes in real time</h2>
-          <p className="mt-2 text-sm text-slate-500">Filter by status, category, and momentum to find the markets you want to trade.</p>
+          <p className="text-xs uppercase tracking-[0.3em] text-indigo-600 font-semibold">{t?.('marketsHeading') || 'Markets'}</p>
+          <h2 className="mt-3 text-3xl font-bold tracking-tight text-slate-900">{t?.('marketsTitle') || 'Trade event outcomes in real time'}</h2>
+          <p className="mt-2 text-sm text-slate-500">{t?.('marketsSubtitle') || 'Filter by status, category, and momentum to find the markets you want to trade.'}</p>
         </div>
         <div className="flex flex-wrap gap-2">
           <div className="inline-flex items-center gap-2 rounded-full bg-slate-100 px-4 py-2 text-sm font-medium text-slate-700">
-            <span className="text-slate-900">{markets.length}</span> markets
+            <span className="text-slate-900">{markets.length}</span> {t?.('marketsCount', { count: markets.length }) || `${markets.length} markets`}
           </div>
           <div className="inline-flex items-center gap-2 rounded-full bg-indigo-50 px-4 py-2 text-sm font-medium text-indigo-700">
-            {filters.status.charAt(0).toUpperCase() + filters.status.slice(1)} status
+            {t?.('statusLabel', { status: filters.status.charAt(0).toUpperCase() + filters.status.slice(1) }) || `${filters.status.charAt(0).toUpperCase() + filters.status.slice(1)} status`}
           </div>
         </div>
       </div>
       <div className="flex flex-col sm:flex-row gap-3 sm:items-center">
         <div className="relative flex-1">
           <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-          <input value={filters.q} onChange={(e) => setFilters((f) => ({ ...f, q: e.target.value }))} placeholder="Search markets…"
+          <input value={filters.q} onChange={(e) => setFilters((f) => ({ ...f, q: e.target.value }))} placeholder={t?.('searchPlaceholder') || 'Search markets…'}
             className="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200" />
         </div>
         <select value={filters.sort} onChange={(e) => setFilters((f) => ({ ...f, sort: e.target.value }))}
           className="px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white">
-          <option value="trending">Trending</option>
-          <option value="newest">Newest</option>
+          <option value="trending">{t?.('sortTrending') || 'Trending'}</option>
+          <option value="newest">{t?.('sortNewest') || 'Newest'}</option>
         </select>
       </div>
       <div className="flex flex-wrap gap-2 items-center">
         {['open', 'closed', 'resolved'].map((s) => (
           <button key={s} onClick={() => setFilters((f) => ({ ...f, status: s }))}
-            className={`h-10 px-4 rounded-full text-sm font-medium capitalize ${filters.status === s ? 'bg-slate-800 text-white' : 'bg-white border border-slate-200 text-slate-600 hover:border-slate-300 hover:text-slate-800'}`}>{s}</button>
+            className={`h-10 px-4 rounded-full text-sm font-medium capitalize ${filters.status === s ? 'bg-slate-800 text-white' : 'bg-white border border-slate-200 text-slate-600 hover:border-slate-300 hover:text-slate-800'}`}>{t?.(s) || s}</button>
         ))}
         <div className="w-px h-8 bg-slate-200 mx-1" />
         {['All', ...CATEGORIES].map((c) => (
@@ -544,10 +557,10 @@ function MarketsView({ ctx, markets, loading, filters, setFilters }) {
       {loading ? (
         <div className="flex justify-center py-20 text-slate-400"><Spinner className="w-8 h-8" /></div>
       ) : markets.length === 0 ? (
-        <div className="text-center py-20 text-slate-400">No markets match these filters.</div>
+        <div className="text-center py-20 text-slate-400">{t?.('noMarkets') || 'No markets match these filters.'}</div>
       ) : (
         <motion.div layout className="market-grid gap-4 grid">
-          {markets.map((m) => <MarketCard key={m.id} market={m} onOpen={ctx.openMarket} />)}
+          {markets.map((m) => <MarketCard key={m.id} market={m} onOpen={ctx.openMarket} t={t} />)}
         </motion.div>
       )}
     </div>
@@ -555,7 +568,7 @@ function MarketsView({ ctx, markets, loading, filters, setFilters }) {
 }
 
 /* ============================ Trade panel ============================ */
-function TradePanel({ ctx, market }) {
+function TradePanel({ ctx, market, t }) {
   const [outcomeId, setOutcomeId] = useState(market.outcomes[0].id);
   const [side, setSide] = useState('buy');
   const [shares, setShares] = useState(10);
@@ -582,8 +595,8 @@ function TradePanel({ ctx, market }) {
       ctx.setUserBalance(res.balance, res.realized_pnl);
       ctx.applyPrices(market.id, res.prices, res.market_volume);
       ctx.refreshPortfolio();
-      ctx.toast('success', `${side === 'buy' ? 'Bought' : 'Sold'} ${nf.format(res.trade.shares)} ${res.trade.outcome_label} @ ${pct1(res.trade.price)}`);
-    } catch (e) { ctx.toast('error', e.message); }
+      ctx.toast('success', t?.('tradeSuccess', { action: t(side === 'buy' ? 'bought' : 'sold'), shares: nf.format(res.trade.shares), outcome: res.trade.outcome_label, price: pct1(res.trade.price) }) || `${side === 'buy' ? 'Bought' : 'Sold'} ${nf.format(res.trade.shares)} ${res.trade.outcome_label} @ ${pct1(res.trade.price)}`);
+    } catch (e) { ctx.toast('error', getErrorMessage(e, t)); }
     finally { setBusy(false); }
   };
 
@@ -593,11 +606,11 @@ function TradePanel({ ctx, market }) {
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-3">
-      <h3 className="font-bold text-slate-800">Trade</h3>
+      <h3 className="font-bold text-slate-800">{t?.('tradeHeading') || 'Trade'}</h3>
       <div className="grid grid-cols-2 gap-2 p-1 bg-slate-100 rounded-xl">
         {['buy', 'sell'].map((s) => (
           <button key={s} onClick={() => setSide(s)}
-            className={`py-1.5 rounded-lg text-sm font-semibold capitalize ${side === s ? (s === 'buy' ? 'bg-emerald-500 text-white' : 'bg-rose-500 text-white') : 'text-slate-500'}`}>{s}</button>
+            className={`py-1.5 rounded-lg text-sm font-semibold capitalize ${side === s ? (s === 'buy' ? 'bg-emerald-500 text-white' : 'bg-rose-500 text-white') : 'text-slate-500'}`}>{t?.(s) || s}</button>
         ))}
       </div>
       <div className="space-y-1.5">
@@ -611,29 +624,29 @@ function TradePanel({ ctx, market }) {
       </div>
       <div>
         <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
-          <span>Shares</span>
+          <span>{t?.('shares') || 'Shares'}</span>
           <button className="text-indigo-600 font-medium" onClick={() => {
             if (side === 'sell') setShares(Math.floor(held));
             else if (ctx.user) setShares(maxAffordable(market.outcomes.map((o) => o.shares_outstanding), market.liquidity_param, market.outcomes.indexOf(sel), ctx.user.balance));
-          }}>Max</button>
+          }}>{t?.('max') || 'Max'}</button>
         </div>
         <input type="number" min="0" value={shares} onChange={(e) => setShares(e.target.value)}
           className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200" />
       </div>
       {quote && !err && (
         <div className="text-sm space-y-1 bg-slate-50 rounded-xl p-3">
-          <Row k="Price impact" v={`${pct1(quote.cur_price)} → ${pct1(quote.new_price)}`} />
-          <Row k="Avg fill" v={pct1(quote.avg_price)} />
+          <Row k={t?.('priceImpact') || 'Price impact'} v={`${pct1(quote.cur_price)} → ${pct1(quote.new_price)}`} />
+          <Row k={t?.('avgFill') || 'Avg fill'} v={pct1(quote.avg_price)} />
           {side === 'buy'
-            ? <><Row k="Cost" v={<Money value={quote.cost} />} /><Row k="Max payout" v={<Money value={quote.max_payout} />} highlight /></>
-            : <Row k="You receive" v={<Money value={quote.proceeds} />} highlight />}
+            ? <><Row k={t?.('cost') || 'Cost'} v={<Money value={quote.cost} />} /><Row k={t?.('maxPayout') || 'Max payout'} v={<Money value={quote.max_payout} />} highlight /></>
+            : <Row k={t?.('youReceive') || 'You receive'} v={<Money value={quote.proceeds} />} highlight />}
         </div>
       )}
       {err && <div className="text-sm text-rose-600 flex items-center gap-1.5"><AlertCircle className="w-4 h-4" />{err}</div>}
-      {!open && <div className="text-sm text-amber-600 flex items-center gap-1.5"><Clock className="w-4 h-4" />Market is {market.status}</div>}
+      {!open && <div className="text-sm text-amber-600 flex items-center gap-1.5"><Clock className="w-4 h-4" />{t?.('marketStatusIs', { status: t?.(market.status) || market.status }) || `Market is ${market.status}`}</div>}
       <button onClick={submit} disabled={disabled}
         className={`w-full py-2.5 rounded-xl font-semibold text-white flex items-center justify-center gap-2 ${disabled ? 'bg-slate-300' : side === 'buy' ? 'bg-emerald-500 hover:bg-emerald-600' : 'bg-rose-500 hover:bg-rose-600'}`}>
-        {busy ? <Spinner /> : !ctx.user ? <><LogIn className="w-4 h-4" /> Sign in to trade</> : <>{side === 'buy' ? 'Buy' : 'Sell'} {sel?.label}</>}
+        {busy ? <Spinner /> : !ctx.user ? <><LogIn className="w-4 h-4" /> {t?.('signInToTrade') || 'Sign in to trade'}</> : <>{t?.(side === 'buy' ? 'buy' : 'sell') || (side === 'buy' ? 'Buy' : 'Sell')} {sel?.label}</>}
       </button>
     </div>
   );
@@ -646,7 +659,7 @@ const Row = ({ k, v, highlight }) => (
 );
 
 /* ============================ Market detail ============================ */
-function ResolvePanel({ ctx, market }) {
+function ResolvePanel({ ctx, market, t }) {
   const [busy, setBusy] = useState(false);
   if (!ctx.user || !(ctx.user.is_admin || market.created_by === ctx.user.id) || market.status === 'resolved') return null;
   const resolve = async (oid) => {
@@ -656,17 +669,17 @@ function ResolvePanel({ ctx, market }) {
       if (res.balance != null) ctx.setUserBalance(res.balance, res.realized_pnl);
       ctx.refreshPortfolio();
       if (res.maker_refund != null) {
-        ctx.toast('success', `Market resolved & refunded ${money(res.maker_refund)} to the maker`);
+        ctx.toast('success', t?.('resolveRefunded', { amount: money(res.maker_refund) }) || `Market resolved & refunded ${money(res.maker_refund)} to the maker`);
       } else {
-        ctx.toast('success', 'Market resolved & paid out');
+        ctx.toast('success', t?.('resolvePaidOut') || 'Market resolved & paid out');
       }
-    } catch (e) { ctx.toast('error', e.message); }
+    } catch (e) { ctx.toast('error', getErrorMessage(e, t)); }
     finally { setBusy(false); }
   };
   return (
     <div className="bg-white rounded-2xl border border-amber-200 p-4 space-y-2">
-      <h3 className="font-bold text-slate-800 flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-amber-500" /> Resolve (admin / creator)</h3>
-      <p className="text-xs text-slate-500">Pick the winning outcome. Each winning share pays 1.00 credit.</p>
+      <h3 className="font-bold text-slate-800 flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-amber-500" /> {t?.('resolveHeading') || 'Resolve (admin / creator)'}</h3>
+      <p className="text-xs text-slate-500">{t?.('resolveHint') || 'Pick the winning outcome. Each winning share pays 1.00 credit.'}</p>
       <div className="flex flex-wrap gap-2">
         {market.outcomes.map((o) => (
           <button key={o.id} disabled={busy} onClick={() => resolve(o.id)}
@@ -677,7 +690,7 @@ function ResolvePanel({ ctx, market }) {
   );
 }
 
-function MarketDetailView({ ctx, detail, onBack }) {
+function MarketDetailView({ ctx, detail, onBack, t }) {
   const [comment, setComment] = useState('');
   if (!detail) return <div className="flex justify-center py-20 text-slate-400"><Spinner className="w-8 h-8" /></div>;
   const winner = detail.resolved_outcome_id && detail.outcomes.find((o) => o.id === detail.resolved_outcome_id);
@@ -685,46 +698,46 @@ function MarketDetailView({ ctx, detail, onBack }) {
     if (!ctx.user) { ctx.requireAuth(); return; }
     if (!comment.trim()) return;
     try { await ctx.ds.addComment(detail.id, comment.trim()); setComment(''); }
-    catch (e) { ctx.toast('error', e.message); }
+    catch (e) { ctx.toast('error', getErrorMessage(e, t)); }
   };
   return (
     <div className="space-y-4">
-      <button onClick={onBack} className="text-sm text-slate-500 hover:text-slate-700 flex items-center gap-1"><ChevronRight className="w-4 h-4 rotate-180" /> Back to markets</button>
+      <button onClick={onBack} className="text-sm text-slate-500 hover:text-slate-700 flex items-center gap-1"><ChevronRight className="w-4 h-4 rotate-180" /> {t?.('backToMarkets') || 'Back to markets'}</button>
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="lg:col-span-2 space-y-4">
           <div className="bg-white rounded-2xl border border-slate-200 p-5">
             <div className="flex items-center gap-2 mb-2">
               <span className="text-xs font-medium text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full">{detail.category}</span>
-              <Badge status={detail.status} />
-              <span className="text-xs text-slate-400 ml-auto">{detail.status === 'resolved' ? 'Settled' : `Closes ${fromNow(detail.close_date)}`}</span>
+              <Badge status={detail.status} t={t} />
+              <span className="text-xs text-slate-400 ml-auto">{detail.status === 'resolved' ? t?.('settled') || 'Settled' : t?.('closes', { time: fromNow(detail.close_date) }) || `Closes ${fromNow(detail.close_date)}`}</span>
             </div>
             <h1 className="text-xl font-bold text-slate-800">{detail.question}</h1>
             {detail.description && <p className="text-sm text-slate-500 mt-2">{detail.description}</p>}
             {winner && (
               <div className="mt-3 inline-flex items-center gap-2 text-sm font-semibold text-emerald-700 bg-emerald-50 px-3 py-1.5 rounded-xl">
-                <CheckCircle2 className="w-4 h-4" /> Resolved: {winner.label}
+                <CheckCircle2 className="w-4 h-4" /> {t?.('resolved') || 'Resolved'}: {winner.label}
               </div>
             )}
           </div>
           <div className="bg-white rounded-2xl border border-slate-200 p-5">
-            <h3 className="font-bold text-slate-800 mb-2 flex items-center gap-2"><BarChart3 className="w-4 h-4 text-indigo-500" /> Price history</h3>
-            <PriceChart market={detail} history={detail.history} />
+            <h3 className="font-bold text-slate-800 mb-2 flex items-center gap-2"><BarChart3 className="w-4 h-4 text-indigo-500" /> {t?.('priceHistory') || 'Price history'}</h3>
+            <PriceChart market={detail} history={detail.history} t={t} />
           </div>
           {detail.resolution_criteria && (
             <div className="bg-white rounded-2xl border border-slate-200 p-5">
-              <h3 className="font-bold text-slate-800 mb-1">Resolution criteria</h3>
+              <h3 className="font-bold text-slate-800 mb-1">{t?.('resolutionCriteriaHeading') || 'Resolution criteria'}</h3>
               <p className="text-sm text-slate-500">{detail.resolution_criteria}</p>
             </div>
           )}
           <div className="bg-white rounded-2xl border border-slate-200 p-5">
-            <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2"><MessageSquare className="w-4 h-4 text-indigo-500" /> Discussion</h3>
+            <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2"><MessageSquare className="w-4 h-4 text-indigo-500" /> {t?.('discussion') || 'Discussion'}</h3>
             <div className="flex gap-2 mb-4">
               <input value={comment} onChange={(e) => setComment(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addComment()}
-                placeholder={ctx.user ? 'Add a comment…' : 'Sign in to comment'} className="flex-1 px-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200" />
+                placeholder={ctx.user ? (t?.('addCommentPlaceholder') || 'Add a comment…') : (t?.('signInToComment') || 'Sign in to comment')} className="flex-1 px-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200" />
               <button onClick={addComment} className="px-3 rounded-xl bg-indigo-500 text-white hover:bg-indigo-600"><Send className="w-4 h-4" /></button>
             </div>
             <div className="space-y-3">
-              {(detail.comments || []).length === 0 && <p className="text-sm text-slate-400">No comments yet.</p>}
+              {(detail.comments || []).length === 0 && <p className="text-sm text-slate-400">{t?.('noComments') || 'No comments yet.'}</p>}
               {(detail.comments || []).map((c) => (
                 <div key={c.id} className="flex gap-2.5">
                   <Avatar user={c.user} />
@@ -738,12 +751,12 @@ function MarketDetailView({ ctx, detail, onBack }) {
           </div>
         </div>
         <div className="space-y-4">
-          <TradePanel ctx={ctx} market={detail} />
-          <ResolvePanel ctx={ctx} market={detail} />
+          <TradePanel ctx={ctx} market={detail} t={t} />
+          <ResolvePanel ctx={ctx} market={detail} t={t} />
           <div className="bg-white rounded-2xl border border-slate-200 p-4">
-            <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2"><Activity className="w-4 h-4 text-indigo-500" /> Recent trades</h3>
+            <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2"><Activity className="w-4 h-4 text-indigo-500" /> {t?.('recentTrades') || 'Recent trades'}</h3>
             <div className="space-y-2">
-              {(detail.recent_trades || []).length === 0 && <p className="text-sm text-slate-400">No trades yet.</p>}
+              {(detail.recent_trades || []).length === 0 && <p className="text-sm text-slate-400">{t?.('noTrades') || 'No trades yet.'}</p>}
               {(detail.recent_trades || []).map((t) => {
                 const u = tradeUser(t);
                 return (
@@ -766,38 +779,38 @@ function MarketDetailView({ ctx, detail, onBack }) {
 }
 
 /* ============================ Portfolio + leaderboard ============================ */
-function PortfolioView({ ctx }) {
+function PortfolioView({ ctx, t }) {
   const [data, setData] = useState(null); const [trades, setTrades] = useState([]); const [loading, setLoading] = useState(true);
   useEffect(() => {
     let alive = true;
     (async () => {
       setLoading(true);
-      try { const [p, t] = await Promise.all([ctx.ds.portfolio(), ctx.ds.myTrades()]); if (alive) { setData(p); setTrades(t); } }
-      catch (e) { ctx.toast('error', e.message); }
+      try { const [p, trades] = await Promise.all([ctx.ds.portfolio(), ctx.ds.myTrades()]); if (alive) { setData(p); setTrades(trades); } }
+      catch (e) { ctx.toast('error', getErrorMessage(e, t)); }
       finally { if (alive) setLoading(false); }
     })();
     return () => { alive = false; };
   }, [ctx.portfolioVersion]);
   if (loading) return <div className="flex justify-center py-20 text-slate-400"><Spinner className="w-8 h-8" /></div>;
-  if (!data) return <div className="text-center py-20 text-slate-400">Sign in to view your portfolio.</div>;
+  if (!data) return <div className="text-center py-20 text-slate-400">{t?.('signInToViewPortfolio') || 'Sign in to view your portfolio.'}</div>;
   const stats = [
-    { label: 'Net worth', value: data.net_worth, icon: Wallet },
-    { label: 'Cash', value: data.cash, icon: Coins },
-    { label: 'Positions', value: data.positions_value, icon: BarChart3 },
-    { label: 'Unrealized P&L', value: data.unrealized_pnl, icon: TrendingUp, pnl: true },
-    { label: 'Realized P&L', value: data.realized_pnl, icon: CheckCircle2, pnl: true },
+    { label: t?.('netWorth') || 'Net worth', value: data.net_worth, icon: Wallet },
+    { label: t?.('cash') || 'Cash', value: data.cash, icon: Coins },
+    { label: t?.('positions') || 'Positions', value: data.positions_value, icon: BarChart3 },
+    { label: t?.('unrealizedPnl') || 'Unrealized P&L', value: data.unrealized_pnl, icon: TrendingUp, pnl: true },
+    { label: t?.('realizedPnl') || 'Realized P&L', value: data.realized_pnl, icon: CheckCircle2, pnl: true },
   ];
   return (
     <div className="space-y-6">
       <div className="space-y-2">
         <div className="flex flex-wrap items-center gap-3">
           <div>
-            <p className="text-xs uppercase tracking-[0.3em] text-indigo-600 font-semibold">Portfolio</p>
-            <h2 className="mt-2 text-3xl font-bold tracking-tight text-slate-900">Your account snapshot</h2>
+            <p className="text-xs uppercase tracking-[0.3em] text-indigo-600 font-semibold">{t?.('portfolioHeading') || 'Portfolio'}</p>
+            <h2 className="mt-2 text-3xl font-bold tracking-tight text-slate-900">{t?.('portfolioTitle') || 'Your account snapshot'}</h2>
           </div>
-          <div className="rounded-2xl bg-slate-100 px-4 py-2 text-sm text-slate-700">Tracked across {data.positions.length} open positions</div>
+          <div className="rounded-2xl bg-slate-100 px-4 py-2 text-sm text-slate-700">{t?.('portfolioPositionsCount', { count: data.positions.length }) || `Tracked across ${data.positions.length} open positions`}</div>
         </div>
-        <p className="max-w-2xl text-sm text-slate-500">View your total value, cash balance, and recent activity. Tap a position to jump back into the market.</p>
+        <p className="max-w-2xl text-sm text-slate-500">{t?.('portfolioSubtitle') || 'View your total value, cash balance, and recent activity. Tap a position to jump back into the market.'}</p>
       </div>
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
         {stats.map((s) => (
@@ -812,12 +825,12 @@ function PortfolioView({ ctx }) {
       <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
         <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between gap-3">
           <div>
-            <h3 className="font-bold text-slate-800">Open positions</h3>
-            <p className="text-sm text-slate-500">Tap to open the market and manage your exposure.</p>
+            <h3 className="font-bold text-slate-800">{t?.('openPositions') || 'Open positions'}</h3>
+            <p className="text-sm text-slate-500">{t?.('openPositionsSubtitle') || 'Tap to open the market and manage your exposure.'}</p>
           </div>
-          <span className="text-sm text-slate-400">{data.positions.length} entries</span>
+          <span className="text-sm text-slate-400">{t?.('entriesCount', { count: data.positions.length }) || `${data.positions.length} entries`}</span>
         </div>
-        {data.positions.length === 0 ? <p className="px-5 py-10 text-sm text-slate-400">No open positions.</p> : (
+        {data.positions.length === 0 ? <p className="px-5 py-10 text-sm text-slate-400">{t?.('noOpenPositions') || 'No open positions.'}</p> : (
           <div className="overflow-x-auto">
             <div className="min-w-[680px] divide-y divide-slate-100">
               {data.positions.map((p) => (
@@ -840,10 +853,10 @@ function PortfolioView({ ctx }) {
         <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
           <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between gap-3">
             <div>
-              <h3 className="font-bold text-slate-800">Recent activity</h3>
-              <p className="text-sm text-slate-500">Latest trades from your account.</p>
+              <h3 className="font-bold text-slate-800">{t?.('recentActivity') || 'Recent activity'}</h3>
+              <p className="text-sm text-slate-500">{t?.('recentActivitySubtitle') || 'Latest trades from your account.'}</p>
             </div>
-            <span className="text-sm text-slate-400">{trades.length} records</span>
+            <span className="text-sm text-slate-400">{t?.('recordsCount', { count: trades.length }) || `${trades.length} records`}</span>
           </div>
           <div className="overflow-x-auto">
             <div className="min-w-[680px] divide-y divide-slate-100">
@@ -865,7 +878,7 @@ function PortfolioView({ ctx }) {
   );
 }
 
-function LeaderboardView({ ctx }) {
+function LeaderboardView({ ctx, t }) {
   const [rows, setRows] = useState(null);
   useEffect(() => { let a = true; ctx.ds.leaderboard().then((r) => a && setRows(r)).catch(() => a && setRows([])); return () => { a = false; }; }, [ctx.portfolioVersion]);
   if (!rows) return <div className="flex justify-center py-20 text-slate-400"><Spinner className="w-8 h-8" /></div>;
@@ -876,11 +889,11 @@ function LeaderboardView({ ctx }) {
           <div className="space-y-1">
             <div className="inline-flex items-center gap-2 text-sm text-slate-500">
               <Trophy className="w-4 h-4 text-amber-500" />
-              <span>Leaderboard</span>
+              <span>{t?.('leaderboardHeading') || 'Leaderboard'}</span>
             </div>
-            <h3 className="text-2xl font-bold text-slate-900">Top traders</h3>
+            <h3 className="text-2xl font-bold text-slate-900">{t?.('leaderboardTitle') || 'Top traders'}</h3>
           </div>
-          <p className="text-sm text-slate-500 max-w-xl">See the highest net worth traders and their realized profits. The list updates as trades happen.</p>
+          <p className="text-sm text-slate-500 max-w-xl">{t?.('leaderboardSubtitle') || 'See the highest net worth traders and their realized profits. The list updates as trades happen.'}</p>
         </div>
       </div>
       <div className="divide-y divide-slate-100">
@@ -892,7 +905,7 @@ function LeaderboardView({ ctx }) {
                 <Avatar user={r} />
                 <div className="min-w-0">
                   <div className="font-semibold text-slate-800 truncate">{r.name}</div>
-                  <div className="text-xs text-slate-500">{r.is_bot ? 'bot trader' : 'human trader'}</div>
+                  <div className="text-xs text-slate-500">{r.is_bot ? (t?.('botTrader') || 'bot trader') : (t?.('humanTrader') || 'human trader')}</div>
                 </div>
               </div>
               <div className="text-right">
@@ -909,7 +922,7 @@ function LeaderboardView({ ctx }) {
 
 /* ============================ Create market + auth modals ============================ */
 function toLocalInput(d) { const p = (n) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; }
-function CreateMarketModal({ ctx, open, onClose }) {
+function CreateMarketModal({ ctx, open, onClose, t }) {
   const [f, setF] = useState({ question: '', description: '', category: 'Other', type: 'binary', liquidity_param: 150, resolution_criteria: '' });
   const [outcomes, setOutcomes] = useState(['', '']);
   const [close, setClose] = useState(toLocalInput(new Date(Date.now() + 7 * DAY)));
@@ -922,16 +935,16 @@ function CreateMarketModal({ ctx, open, onClose }) {
       if (typeof m.balance === 'number') {
         ctx.setUserBalance(m.balance, m.realized_pnl);
       }
-      ctx.toast('success', 'Market created'); onClose(); ctx.openMarket(m.id);
-    } catch (e) { ctx.toast('error', e.message); }
+      ctx.toast('success', t('marketCreated')); onClose(); ctx.openMarket(m.id);
+    } catch (e) { ctx.toast('error', getErrorMessage(e, t)); }
     finally { setBusy(false); }
   };
   return (
-    <Modal open={open} onClose={onClose} title="Create a market">
+    <Modal open={open} onClose={onClose} title={t('createMarketTitle')}>
       <div className="space-y-3">
-        <input value={f.question} onChange={(e) => setF({ ...f, question: e.target.value })} placeholder="Question (e.g. Will X happen by …?)"
+        <input value={f.question} onChange={(e) => setF({ ...f, question: e.target.value })} placeholder={t('questionPlaceholder')}
           className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200" />
-        <textarea value={f.description} onChange={(e) => setF({ ...f, description: e.target.value })} placeholder="Description" rows={2}
+        <textarea value={f.description} onChange={(e) => setF({ ...f, description: e.target.value })} placeholder={t('descriptionPlaceholder')} rows={2}
           className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200" />
         <div className="grid grid-cols-2 gap-2">
           <select value={f.category} onChange={(e) => setF({ ...f, category: e.target.value })} className="px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white">
@@ -946,33 +959,33 @@ function CreateMarketModal({ ctx, open, onClose }) {
           <div className="space-y-2">
             {outcomes.map((o, i) => (
               <div key={i} className="flex gap-2">
-                <input value={o} onChange={(e) => setOutcomes(outcomes.map((x, j) => (j === i ? e.target.value : x)))} placeholder={`Outcome ${i + 1}`}
+                <input value={o} onChange={(e) => setOutcomes(outcomes.map((x, j) => (j === i ? e.target.value : x)))} placeholder={`${t('outcomePlaceholder')} ${i + 1}`}
                   className="flex-1 px-3 py-2 rounded-xl border border-slate-200 text-sm" />
                 {outcomes.length > 2 && <button onClick={() => setOutcomes(outcomes.filter((_, j) => j !== i))} className="px-2 text-slate-400"><X className="w-4 h-4" /></button>}
               </div>
             ))}
-            <button onClick={() => setOutcomes([...outcomes, ''])} className="text-sm text-indigo-600 font-medium">+ Add outcome</button>
+            <button onClick={() => setOutcomes([...outcomes, ''])} className="text-sm text-indigo-600 font-medium">{t('addOutcome')}</button>
           </div>
         )}
         <div className="grid grid-cols-2 gap-2">
-          <label className="text-xs text-slate-500">Close date
+          <label className="text-xs text-slate-500">{t('closeDate')}
             <input type="datetime-local" value={close} onChange={(e) => setClose(e.target.value)} className="w-full mt-1 px-3 py-2 rounded-xl border border-slate-200 text-sm" />
           </label>
-          <label className="text-xs text-slate-500">Liquidity (b)
+          <label className="text-xs text-slate-500">{t('liquidity')}
             <input type="number" value={f.liquidity_param} onChange={(e) => setF({ ...f, liquidity_param: e.target.value })} className="w-full mt-1 px-3 py-2 rounded-xl border border-slate-200 text-sm" />
           </label>
         </div>
-        <input value={f.resolution_criteria} onChange={(e) => setF({ ...f, resolution_criteria: e.target.value })} placeholder="Resolution criteria"
+        <input value={f.resolution_criteria} onChange={(e) => setF({ ...f, resolution_criteria: e.target.value })} placeholder={t('resolutionCriteria')}
           className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
         <button onClick={submit} disabled={busy || f.question.length < 8} className={`w-full py-2.5 rounded-xl font-semibold text-white flex items-center justify-center gap-2 ${busy || f.question.length < 8 ? 'bg-slate-300' : 'bg-indigo-500 hover:bg-indigo-600'}`}>
-          {busy ? <Spinner /> : <><Plus className="w-4 h-4" /> Create market</>}
+          {busy ? <Spinner /> : <><Plus className="w-4 h-4" /> {t('createMarket')}</>}
         </button>
       </div>
     </Modal>
   );
 }
 
-function AuthModal({ ctx, open, onClose }) {
+function AuthModal({ ctx, open, onClose, t }) {
   const [mode, setMode] = useState('login');
   const [name, setName] = useState(ctx.dsMode === 'demo' ? 'You' : '');
   const [email, setEmail] = useState('');
@@ -981,21 +994,21 @@ function AuthModal({ ctx, open, onClose }) {
   const submit = async () => {
     setBusy(true);
     try { await ctx.doAuth(mode, { name, email, password }); onClose(); }
-    catch (e) { ctx.toast('error', e.message); }
+    catch (e) { ctx.toast('error', getErrorMessage(e, t)); }
     finally { setBusy(false); }
   };
   return (
-    <Modal open={open} onClose={onClose} title={mode === 'login' ? 'Sign in' : 'Create account'}>
+    <Modal open={open} onClose={onClose} title={mode === 'login' ? t('login') : t('register')}>
       <div className="space-y-3">
-        {ctx.dsMode === 'demo' && <div className="text-xs bg-amber-50 text-amber-700 rounded-xl px-3 py-2">Demo mode — any credentials work. Prefilled with the seed user <b>You</b>.</div>}
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Username" className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
-        {mode === 'register' && <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email (optional)" className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />}
-        <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && submit()} placeholder="Password" className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
+        {ctx.dsMode === 'demo' && <div className="text-xs bg-amber-50 text-amber-700 rounded-xl px-3 py-2">{t('demoHint')}</div>}
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder={t('username')} className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
+        {mode === 'register' && <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder={t('email')} className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />}
+        <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && submit()} placeholder={t('password')} className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
         <button onClick={submit} disabled={busy} className="w-full py-2.5 rounded-xl font-semibold text-white bg-indigo-500 hover:bg-indigo-600 flex items-center justify-center gap-2">
-          {busy ? <Spinner /> : mode === 'login' ? 'Sign in' : 'Create account'}
+          {busy ? <Spinner /> : mode === 'login' ? t('login') : t('register')}
         </button>
         <button onClick={() => setMode(mode === 'login' ? 'register' : 'login')} className="w-full text-sm text-slate-500">
-          {mode === 'login' ? "No account? Register" : 'Have an account? Sign in'}
+          {mode === 'login' ? t('registerSwitch') : t('loginSwitch')}
         </button>
       </div>
     </Modal>
@@ -1006,6 +1019,7 @@ function AuthModal({ ctx, open, onClose }) {
 export default function App() {
   const [mode, setMode] = useState('connecting'); // connecting | live | demo
   const [token, setToken] = useState(null);
+  const [language, setLanguage] = useState(getInitialLanguage);
   const [user, setUser] = useState(null);
   const [view, setView] = useState({ name: 'markets' });
   const [markets, setMarkets] = useState([]);
@@ -1018,12 +1032,22 @@ export default function App() {
   const [createOpen, setCreateOpen] = useState(false);
   const [toasts, setToasts] = useState([]);
 
+  useEffect(() => {
+    if (typeof window !== 'undefined') window.localStorage.setItem('forecast-language', language);
+  }, [language]);
+
+  const t = useCallback((key, fallbackOrParams, params) => {
+    const fallback = typeof fallbackOrParams === 'string' ? fallbackOrParams : null;
+    const values = typeof fallbackOrParams === 'object' && fallbackOrParams !== null ? fallbackOrParams : params || {};
+    return translate(language, key, fallback, values);
+  }, [language]);
+
   const toast = useCallback((type, msg) => {
     const id = makeId(); setToasts((t) => [...t, { id, type, msg }]);
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3500);
   }, []);
 
-  const ds = useMemo(() => (mode === 'demo' ? makeDemoDS(demoState.you.id) : makeLiveDS(token)), [mode, token]);
+  const ds = useMemo(() => (mode === 'demo' ? makeDemoDS(demoState.you.id, t) : makeLiveDS(token, t)), [mode, token, t]);
 
   /* connection probe */
   useEffect(() => {
@@ -1037,7 +1061,7 @@ export default function App() {
   const loadMarkets = useCallback(async () => {
     setLoadingMarkets(true);
     try { setMarkets(await ds.listMarkets({ status: filters.status, category: filters.category, q: filters.q, sort: filters.sort, limit: 60 })); }
-    catch (e) { toast('error', e.message); }
+    catch (e) { toast('error', getErrorMessage(e, t)); }
     finally { setLoadingMarkets(false); }
   }, [ds, filters, toast]);
   useEffect(() => { if (mode !== 'connecting') loadMarkets(); }, [mode, filters, loadMarkets]);
@@ -1097,18 +1121,18 @@ export default function App() {
 
   const openMarket = useCallback(async (id) => {
     setView({ name: 'market', id }); setDetail(null);
-    try { setDetail(await ds.getMarket(id)); } catch (e) { toast('error', e.message); }
+    try { setDetail(await ds.getMarket(id)); } catch (e) { toast('error', getErrorMessage(e, t)); }
   }, [ds, toast]);
 
   const doAuth = useCallback(async (kind, { name, email, password }) => {
     if (mode === 'demo') {
       const u = Object.values(demoState.users).find((x) => x.name === name) || demoState.you;
-      setUser(u); setToken('demo'); toast('success', `Signed in as ${u.name}`); return;
+      setUser(u); setToken('demo'); toast('success', t?.('signedInAs', { name: u.name }) || `Signed in as ${u.name}`); return;
     }
     const tok = kind === 'login' ? (await loginHttp(name, password)).access_token : (await http('/auth/register', { method: 'POST', body: { name, email: email || null, password } })).access_token;
     setToken(tok);
     const me = await http('/auth/me', { headers: { Authorization: `Bearer ${tok}` } });
-    setUser(me); toast('success', `Welcome, ${me.name}`);
+    setUser(me); toast('success', t?.('welcome', { name: me.name }) || `Welcome, ${me.name}`);
   }, [mode, toast]);
 
   const logout = () => { setUser(mode === 'demo' ? demoState.you : null); setToken(mode === 'demo' ? 'demo' : null); setPortfolio(null); };
@@ -1124,11 +1148,11 @@ export default function App() {
       {/* connection banner */}
       {mode === 'demo' && (
         <div className="bg-amber-500 text-white text-sm px-4 py-3 flex items-center justify-center gap-3 flex-wrap">
-          <WifiOff className="w-4 h-4" /> Backend not reachable — running on in-browser demo data with live LMSR math.
+          <WifiOff className="w-4 h-4" /> {t('demoBanner')}
           <span className="rounded-full bg-white/15 px-2 py-0.5 text-[0.75rem] font-semibold">
             {backendAccessMode}
           </span>
-          <button onClick={() => { setMode('connecting'); http('/config', { timeout: 2500 }).then(() => setMode('live')).catch(() => setMode('demo')); }} className="underline font-semibold">Retry connection</button>
+          <button onClick={() => { setMode('connecting'); http('/config', { timeout: 2500 }).then(() => setMode('live')).catch(() => setMode('demo')); }} className="underline font-semibold">{t('retry')}</button>
         </div>
       )}
 
@@ -1141,7 +1165,7 @@ export default function App() {
             </button>
             {mode !== 'connecting' && (
               <span className={`inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-semibold ${mode === 'live' ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>
-                {mode === 'live' ? <><Wifi className="w-3.5 h-3.5" /> Live</> : <><WifiOff className="w-3.5 h-3.5" /> Demo</>}
+                {mode === 'live' ? <><Wifi className="w-3.5 h-3.5" /> {t('live')}</> : <><WifiOff className="w-3.5 h-3.5" /> {t('demo')}</>}
               </span>
             )}
             {!import.meta.env.PROD && (
@@ -1154,15 +1178,21 @@ export default function App() {
             )}
           </div>
           <nav className="hidden sm:flex items-center gap-2 ml-2">
-            {[['markets', 'Markets', TrendingUp], ['portfolio', 'Portfolio', Wallet], ['leaderboard', 'Leaderboard', Trophy]].map(([k, label, Icon]) => (
+            {[['markets', t('markets'), TrendingUp], ['portfolio', t('portfolio'), Wallet], ['leaderboard', t('leaderboard'), Trophy]].map(([k, label, Icon]) => (
               <button key={k} onClick={() => setView({ name: k })} className={`px-4 py-2 rounded-2xl text-sm font-medium flex items-center gap-2 ${view.name === k ? 'bg-slate-100 text-slate-800' : 'text-slate-500 hover:text-slate-700'}`}>
                 <Icon className="w-4 h-4" />{label}
               </button>
             ))}
           </nav>
           <div className="ml-auto flex flex-1 min-w-0 flex-wrap items-center justify-end gap-2">
-            {mode === 'live' && <span className="hidden sm:inline-flex items-center gap-1 text-xs text-emerald-600"><Wifi className="w-3.5 h-3.5" />{rt.status === 'open' ? 'live' : 'connecting'}</span>}
-            <button onClick={() => setCreateOpen(true)} className="px-4 py-2 rounded-2xl bg-indigo-500 text-white text-sm font-medium flex items-center gap-2 hover:bg-indigo-600 shadow-sm small-nav-button"><Plus className="w-4 h-4" /><span className="hidden sm:inline">New</span></button>
+            {mode === 'live' && <span className="hidden sm:inline-flex items-center gap-1 text-xs text-emerald-600"><Wifi className="w-3.5 h-3.5" />{rt.status === 'open' ? t('live') : t('connecting')}</span>}
+            <label className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-slate-50 px-2 py-2 text-sm text-slate-600">
+              <span className="hidden sm:inline">{t('selectLanguage')}</span>
+              <select value={language} onChange={(e) => setLanguage(e.target.value)} className="bg-transparent text-sm font-medium outline-none">
+                {SUPPORTED_LANGUAGES.map((code) => <option key={code} value={code}>{LANGUAGE_LABELS[code]}</option>)}
+              </select>
+            </label>
+            <button onClick={() => setCreateOpen(true)} className="px-4 py-2 rounded-2xl bg-indigo-500 text-white text-sm font-medium flex items-center gap-2 hover:bg-indigo-600 shadow-sm small-nav-button"><Plus className="w-4 h-4" /><span className="hidden sm:inline">{t('new')}</span></button>
             {user ? (
               <div className="flex items-center gap-2 min-w-0">
                 <span className="hidden sm:inline-flex"><Money value={user.balance} className="text-sm font-semibold text-slate-700" /></span>
@@ -1170,12 +1200,12 @@ export default function App() {
                 <button onClick={logout} className="text-slate-400 hover:text-slate-600"><LogOut className="w-4 h-4" /></button>
               </div>
             ) : (
-              <button onClick={() => setAuthOpen(true)} className="px-4 py-2 rounded-2xl border border-slate-200 text-sm font-medium flex items-center gap-2 small-nav-button"><LogIn className="w-4 h-4" />Sign in</button>
+              <button onClick={() => setAuthOpen(true)} className="px-4 py-2 rounded-2xl border border-slate-200 text-sm font-medium flex items-center gap-2 small-nav-button"><LogIn className="w-4 h-4" />{t('signIn')}</button>
             )}
           </div>
         </div>
         <nav className="sm:hidden flex border-t border-slate-100 bg-white overflow-x-auto">
-          {[['markets', 'Markets', TrendingUp], ['portfolio', 'Portfolio', Wallet], ['leaderboard', 'Leaders', Trophy]].map(([k, label, Icon]) => (
+          {[['markets', t('markets'), TrendingUp], ['portfolio', t('portfolio'), Wallet], ['leaderboard', t('leaderboard'), Trophy]].map(([k, label, Icon]) => (
             <button key={k} onClick={() => setView({ name: k })} className={`flex-1 min-w-[84px] py-2.5 text-xs font-semibold inline-flex flex-col items-center justify-center gap-1 ${view.name === k ? 'text-indigo-600 border-b-2 border-indigo-500 bg-indigo-50' : 'text-slate-500 hover:text-slate-700'}`}>
               <Icon className="w-4 h-4" />
               <span className="leading-none">{label}</span>
@@ -1186,22 +1216,22 @@ export default function App() {
 
       <main className="max-w-7xl mx-auto px-4 py-10">
         {mode === 'connecting' ? (
-          <div className="flex flex-col items-center py-24 text-slate-400 gap-3"><Spinner className="w-8 h-8" /><span className="text-sm">Connecting to backend…</span></div>
+          <div className="flex flex-col items-center py-24 text-slate-400 gap-3"><Spinner className="w-8 h-8" /><span className="text-sm">{t('connecting')}</span></div>
         ) : view.name === 'markets' ? (
           <div className="panel-card p-6">
-            <MarketsView ctx={ctx} markets={markets} loading={loadingMarkets} filters={filters} setFilters={setFilters} />
+            <MarketsView ctx={ctx} markets={markets} loading={loadingMarkets} filters={filters} setFilters={setFilters} t={t} />
           </div>
         ) : view.name === 'market' ? (
-          <MarketDetailView ctx={ctx} detail={detail} onBack={() => setView({ name: 'markets' })} />
+          <MarketDetailView ctx={ctx} detail={detail} onBack={() => setView({ name: 'markets' })} t={t} />
         ) : view.name === 'portfolio' ? (
-          <PortfolioView ctx={ctx} />
+          <PortfolioView ctx={ctx} t={t} />
         ) : (
-          <LeaderboardView ctx={ctx} />
+          <LeaderboardView ctx={ctx} t={t} />
         )}
       </main>
 
-      <CreateMarketModal ctx={ctx} open={createOpen} onClose={() => setCreateOpen(false)} />
-      <AuthModal ctx={ctx} open={authOpen} onClose={() => setAuthOpen(false)} />
+      <CreateMarketModal ctx={ctx} open={createOpen} onClose={() => setCreateOpen(false)} t={t} />
+      <AuthModal ctx={ctx} open={authOpen} onClose={() => setAuthOpen(false)} t={t} />
 
       {/* toasts */}
       <div className="fixed bottom-4 right-4 z-50 space-y-2">
