@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from app.config import Settings
 from app.main import app, health, initialize_database
 
 
@@ -19,3 +20,8 @@ class TestDatabaseStartup(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["status"], "ok")
         self.assertEqual(response["database"], "starting")
         self.assertFalse(response["db_ready"])
+
+    def test_settings_normalize_render_postgres_url_to_asyncpg(self):
+        settings = Settings(database_url="postgres://user:pass@host:5432/db")
+
+        self.assertEqual(settings.database_url, "postgresql+asyncpg://user:pass@host:5432/db")
