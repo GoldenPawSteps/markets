@@ -9,6 +9,8 @@
 html {
   scroll-behavior: smooth;
   min-height: 100%;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 body {
@@ -48,6 +50,7 @@ input,
 select,
 textarea {
   border-radius: 0.75rem;
+  font-size: 16px;
   transition: border-color 180ms ease, box-shadow 180ms ease, background-color 180ms ease;
 }
 
