@@ -50,8 +50,21 @@ input,
 select,
 textarea {
   border-radius: 0.75rem;
-  font-size: 16px;
+  font-size: 16px !important;
   transition: border-color 180ms ease, box-shadow 180ms ease, background-color 180ms ease;
+}
+
+input[type="search"],
+input[type="text"],
+input[type="email"],
+input[type="password"],
+input[type="number"],
+input[type="datetime-local"],
+textarea,
+select {
+  font-size: 16px !important;
+  -webkit-appearance: none;
+  appearance: none;
 }
 
 input:focus,
