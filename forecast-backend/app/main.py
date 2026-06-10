@@ -84,7 +84,10 @@ async def initialize_database() -> bool:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         async with AsyncSessionLocal() as db:
-            await seed_if_empty(db)
+            if not settings.skip_seed:
+                await seed_if_empty(db)
+            else:
+                logger.info("SKIP_SEED is set; skipping demo data seeding on startup")
         return True
     except Exception as exc:
         logger.warning("Database initialization failed during startup: %s", exc)

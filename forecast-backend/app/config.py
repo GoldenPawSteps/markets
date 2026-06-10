@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 60 * 24 * 7
     admin_only_create: bool = False
     enable_bot_simulator: bool = False
+    # When true, skip inserting demo seed data on startup (useful for production)
+    skip_seed: bool = False
     starting_balance: float = 1000.0
     cors_origins: str = "http://localhost:3000,http://localhost:5173"
     cors_origin_regex: str | None = r"https://.*\.onrender\.com|http://localhost(:\d+)?$"
