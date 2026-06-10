@@ -6,6 +6,32 @@
   color-scheme: light;
 }
 
+html.dark {
+  color-scheme: dark;
+}
+
+/* Basic dark-mode adjustments for elements that use Tailwind utility classes
+   (many components use `bg-white`, `text-slate-*`, or `border-slate-*`). */
+html.dark body {
+  color: #e6eef8;
+  background: radial-gradient(circle at top left, rgba(99, 102, 241, 0.06), transparent 28%), radial-gradient(circle at 80% 8%, rgba(14, 165, 233, 0.04), transparent 22%), #071028;
+}
+
+html.dark .bg-white { background-color: #071028 !important; }
+html.dark .text-slate-900 { color: #e6eef8 !important; }
+html.dark .text-slate-800 { color: #cbd5e1 !important; }
+html.dark .text-slate-700 { color: #94a3b8 !important; }
+html.dark .text-slate-600 { color: #94a3b8 !important; }
+html.dark .text-slate-500 { color: #94a3b8 !important; }
+html.dark .text-slate-400 { color: #64748b !important; }
+html.dark .bg-slate-50 { background-color: transparent !important; }
+html.dark .border-slate-200 { border-color: rgba(255,255,255,0.06) !important; }
+html.dark .bg-slate-100 { background-color: rgba(255,255,255,0.02) !important; }
+html.dark .bg-indigo-50 { background-color: rgba(99,102,241,0.08) !important; }
+html.dark .bg-emerald-50 { background-color: rgba(16,185,129,0.06) !important; }
+html.dark .bg-amber-50 { background-color: rgba(245,158,11,0.06) !important; }
+
+
 html {
   scroll-behavior: smooth;
   min-height: 100%;
