@@ -760,7 +760,7 @@ function MarketDetailView({ ctx, detail, onBack, t }) {
           {detail.resolution_criteria && (
             <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-5">
               <h3 className="font-bold text-slate-800 mb-1">{t?.('resolutionCriteriaHeading') || 'Resolution criteria'}</h3>
-              <p className="text-sm text-slate-500">{detail.resolution_criteria}</p>
+              <p className="text-sm text-slate-500 break-words [overflow-wrap:anywhere]">{detail.resolution_criteria}</p>
             </div>
           )}
           <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-5">
