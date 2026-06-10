@@ -44,12 +44,12 @@ const money = (x) => (x < 0 ? '−' : '') + nf.format(Math.abs(Number(x) || 0));
 const pct = (x) => `${(x * 100).toFixed(0)}%`;
 const pct1 = (x) => `${(x * 100).toFixed(1)}%`;
 const fmtDay = (iso) => new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-function fromNow(iso) {
+function fromNow(iso, t) {
   const diff = new Date(iso).getTime() - Date.now();
   const past = diff < 0; const s = Math.abs(diff) / 1000;
   const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
   const str = d > 0 ? `${d}d` : h > 0 ? `${h}h` : `${m}m`;
-  return past ? `${str} ago` : `in ${str}`;
+  return past ? `${str} ${t?.('ago') || 'ago'}` : `${t?.('in') || 'in'} ${str}`;
 }
 function hashColor(str) {
   let h = 0; for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) >>> 0;
@@ -521,7 +521,7 @@ function MarketCard({ market, onOpen, t }) {
     <motion.button layout onClick={() => onOpen(market.id)} whileHover={{ y: -3 }}
       className="group market-card text-left bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 p-5 hover:shadow-xl transition-all duration-200 flex flex-col gap-4">
       <div className="flex items-start justify-between gap-2">
-        <span className="text-xs font-medium text-indigo-600 dark:text-indigo-200 bg-indigo-50 dark:bg-indigo-900 px-2 py-0.5 rounded-full">{market.category}</span>
+        <span className="text-xs font-medium text-indigo-600 dark:text-indigo-200 bg-indigo-50 dark:bg-indigo-900 px-2 py-0.5 rounded-full">{t?.(market.category) || market.category}</span>
         <Badge status={market.status} t={t} />
       </div>
       <h3 className="font-semibold text-slate-800 dark:text-slate-100 leading-snug line-clamp-2">{market.question}</h3>
@@ -541,7 +541,7 @@ function MarketCard({ market, onOpen, t }) {
       </div>
       <div className="flex items-center justify-between text-xs text-slate-400 dark:text-slate-400 pt-1 border-t border-slate-100 dark:border-slate-800">
         <span className="inline-flex items-center gap-1"><Activity className="w-3 h-3" /> Vol {money(market.volume)}</span>
-        <span className="inline-flex items-center gap-1"><Clock className="w-3 h-3" /> {market.status === 'resolved' ? t?.('settled') || 'Settled' : fromNow(market.close_date)}</span>
+        <span className="inline-flex items-center gap-1"><Clock className="w-3 h-3" /> {market.status === 'resolved' ? t?.('settled') || 'Settled' : fromNow(market.close_date, t)}</span>
       </div>
     </motion.button>
   );
@@ -585,7 +585,7 @@ function MarketsView({ ctx, markets, loading, filters, setFilters, t }) {
         <div className="w-px h-8 bg-slate-200 dark:bg-slate-800 mx-1" />
         {['All', ...CATEGORIES].map((c) => (
           <button key={c} onClick={() => setFilters((f) => ({ ...f, category: c }))}
-            className={`h-10 px-4 rounded-full text-sm ${filters.category === c ? 'bg-indigo-100 text-indigo-700 font-medium' : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-500 hover:border-slate-300 hover:text-slate-700'}`}>{c}</button>
+            className={`h-10 px-4 rounded-full text-sm ${filters.category === c ? 'bg-indigo-100 text-indigo-700 font-medium' : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-500 hover:border-slate-300 hover:text-slate-700'}`}>{t?.(c) || c}</button>
         ))}
       </div>
       {loading ? (
@@ -741,9 +741,9 @@ function MarketDetailView({ ctx, detail, onBack, t }) {
         <div className="lg:col-span-2 space-y-4">
           <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-5">
             <div className="flex items-center gap-2 mb-2">
-              <span className="text-xs font-medium text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full">{detail.category}</span>
+              <span className="text-xs font-medium text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full">{t?.(detail.category) || detail.category}</span>
               <Badge status={detail.status} t={t} />
-              <span className="text-xs text-slate-400 ml-auto">{detail.status === 'resolved' ? t?.('settled') || 'Settled' : t?.('closes', { time: fromNow(detail.close_date) }) || `Closes ${fromNow(detail.close_date)}`}</span>
+              <span className="text-xs text-slate-400 ml-auto">{detail.status === 'resolved' ? t?.('settled') || 'Settled' : t?.('closes', { time: fromNow(detail.close_date, t) }) || `Closes ${fromNow(detail.close_date, t)}`}</span>
             </div>
             <h1 className="text-xl font-bold text-slate-800">{detail.question}</h1>
             {detail.description && <p className="text-sm text-slate-500 mt-2">{detail.description}</p>}
@@ -776,7 +776,7 @@ function MarketDetailView({ ctx, detail, onBack, t }) {
                 <div key={c.id} className="flex gap-2.5">
                   <Avatar user={c.user} />
                   <div>
-                    <div className="text-sm"><span className="font-semibold text-slate-700">{c.user.name}</span> <span className="text-xs text-slate-400">{fromNow(c.created_at)}</span></div>
+                    <div className="text-sm"><span className="font-semibold text-slate-700">{c.user.name}</span> <span className="text-xs text-slate-400">{fromNow(c.created_at, t)}</span></div>
                     <p className="text-sm text-slate-600">{c.text}</p>
                   </div>
                 </div>
@@ -982,7 +982,7 @@ function CreateMarketModal({ ctx, open, onClose, t }) {
           className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200" />
         <div className="grid grid-cols-2 gap-2">
           <select value={f.category} onChange={(e) => setF({ ...f, category: e.target.value })} className="px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-800 text-sm bg-white dark:bg-slate-900">
-            {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
+            {CATEGORIES.map((c) => <option key={c} value={c}>{t?.(c) || c}</option>)}
           </select>
           <select value={f.type} onChange={(e) => setF({ ...f, type: e.target.value })} className="px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-800 text-sm bg-white dark:bg-slate-900">
             <option value="binary">Binary (Yes/No)</option>
@@ -1244,10 +1244,10 @@ export default function App() {
           </nav>
           <div className="ml-auto flex flex-1 min-w-0 flex-wrap items-center justify-end gap-2">
             {mode === 'live' && <span className="hidden sm:inline-flex items-center gap-1 text-xs text-emerald-600"><Wifi className="w-3.5 h-3.5" />{rt.status === 'open' ? t('live') : t('connecting')}</span>}
-            <label className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-slate-50 px-2 py-2 text-sm text-slate-600">
+            <label className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-slate-50 px-2 py-2 text-sm text-slate-600 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-200">
               <span className="hidden sm:inline">{t('selectLanguage')}</span>
-              <select value={language} onChange={(e) => setLanguage(e.target.value)} className="bg-transparent text-sm font-medium outline-none">
-                {SUPPORTED_LANGUAGES.map((code) => <option key={code} value={code}>{LANGUAGE_LABELS[code]}</option>)}
+              <select value={language} onChange={(e) => setLanguage(e.target.value)} className="bg-slate-900 text-sm font-medium outline-none text-slate-100 dark:bg-slate-900 dark:text-slate-100">
+                {SUPPORTED_LANGUAGES.map((code) => <option key={code} value={code} className="bg-slate-900 text-slate-100 dark:bg-slate-900 dark:text-slate-100">{LANGUAGE_LABELS[code]}</option>)}
               </select>
             </label>
             <button onClick={() => {
