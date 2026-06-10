@@ -9,6 +9,8 @@ services:
         fromDatabase:
           name: forecast-db
           property: connectionString
+      - key: SKIP_SEED
+        value: "true"
       - key: JWT_SECRET
         value: replace-this-with-a-long-random-string
       - key: JWT_ALGORITHM
