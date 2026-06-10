@@ -561,7 +561,7 @@ function MarketsView({ ctx, markets, loading, filters, setFilters, t }) {
             <span className="text-slate-900 dark:text-slate-100">{markets.length}</span> {t?.('marketsCount', { count: markets.length }) || `${markets.length} markets`}
           </div>
           <div className="inline-flex items-center gap-2 rounded-full bg-indigo-50 px-4 py-2 text-sm font-medium text-indigo-700">
-            {t?.('statusLabel', { status: filters.status.charAt(0).toUpperCase() + filters.status.slice(1) }) || `${filters.status.charAt(0).toUpperCase() + filters.status.slice(1)} status`}
+            {t?.('statusLabel', { status: t?.(filters.status) || (filters.status.charAt(0).toUpperCase() + filters.status.slice(1)) }) || `${t?.(filters.status) || (filters.status.charAt(0).toUpperCase() + filters.status.slice(1))} status`}
           </div>
         </div>
       </div>
