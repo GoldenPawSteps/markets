@@ -1187,7 +1187,7 @@ export default function App() {
         </div>
       )}
 
-      <header className="sticky top-0 z-30 bg-white/95 backdrop-blur border-b border-slate-200 header-shadow">
+      <header className="sticky top-0 z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur border-b border-slate-200 dark:border-slate-800 header-shadow">
         <div className="max-w-7xl mx-auto px-4 py-3 flex flex-wrap items-center gap-3 justify-between min-w-0">
           <div className="flex flex-wrap items-center gap-2 min-w-0">
             <button onClick={() => setView({ name: 'markets' })} className="flex items-center gap-2 font-bold text-slate-800 min-w-0">
