@@ -117,9 +117,7 @@ function getErrorMessage(error, t) {
   if (lower.includes('market not found')) return t?.('marketNotFound') || 'Market not found';
   if (lower.includes('market is not open')) return t?.('marketNotOpen') || 'Market is not open';
   if (lower.includes('enter a quantity')) return t?.('enterQuantity') || 'Enter a quantity';
-  if (status === 400 || status === 409 || lower.includes('that name is taken') || lower.includes('taken') || lower.includes('already exists') || lower.includes('duplicate')) {
-    return t?.('nameTaken') || 'That name is taken';
-  }
+  if (lower.includes('that name is taken')) return t?.('nameTaken') || 'That name is taken';
   if (lower.includes('request failed')) return t?.('requestFailed') || 'Request failed';
   return msg || (t?.('requestFailed') || 'Request failed');
 }
@@ -870,7 +868,7 @@ function PortfolioView({ ctx, t }) {
           <div className="overflow-x-auto">
             <div className="min-w-[680px] divide-y divide-slate-100">
               {data.positions.map((p) => (
-                <button key={p.outcome_id} onClick={() => ctx.openMarket(p.market_id)} className="w-full text-left px-5 py-4 hover:bg-slate-50 flex items-center justify-between gap-4">
+                <button key={p.outcome_id} onClick={() => ctx.openMarket(p.market_id)} className="w-full text-left px-5 py-4 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center justify-between gap-4">
                   <div className="min-w-0">
                     <div className="text-sm font-semibold text-slate-800 truncate">{p.question}</div>
                     <div className="mt-1 text-xs text-slate-500">{nf.format(p.shares)} × {p.outcome_label} @ {pct1(p.avg_price)} → {pct1(p.cur_price)}</div>
@@ -934,7 +932,7 @@ function LeaderboardView({ ctx, t }) {
       </div>
       <div className="divide-y divide-slate-100">
         {rows.map((r, i) => (
-          <div key={r.id} className="px-5 py-4 hover:bg-slate-50 transition-colors">
+          <div key={r.id} className="px-5 py-4 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors">
             <div className="grid grid-cols-[auto_1fr_auto] items-center gap-4">
               <span className={`w-8 text-center text-sm font-semibold ${i < 3 ? 'text-amber-500' : 'text-slate-400'}`}>{i + 1}</span>
               <div className="flex items-center gap-3 min-w-0">
