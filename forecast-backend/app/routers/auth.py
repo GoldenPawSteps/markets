@@ -15,7 +15,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 async def register(body: schemas.RegisterBody, db: AsyncSession = Depends(get_db)):
     exists = (await db.execute(select(models.User).where(models.User.name == body.name))).scalar_one_or_none()
     if exists:
-        raise HTTPException(400, "That name is taken")
+        raise HTTPException(status_code=409, detail="That name is taken")
     user = models.User(
         name=body.name, email=body.email, hashed_password=hash_password(body.password),
         avatar=body.name[:2].upper(), color="#4f46e5",

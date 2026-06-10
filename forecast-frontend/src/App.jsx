@@ -3,6 +3,7 @@ import {
   TrendingUp, Search, Plus, Wallet, Trophy, LogIn, LogOut, X, Check, Loader2,
   MessageSquare, Clock, CheckCircle2, Coins, Activity, ChevronRight, Send,
   AlertCircle, Wifi, WifiOff, Sparkles, BarChart3, Users, ArrowUpRight, ArrowDownRight,
+  Sun, Moon,
 } from 'lucide-react';
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
@@ -106,13 +107,19 @@ const qs = (o) => Object.entries(o).filter(([, v]) => v !== undefined && v !== n
   .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
 
 function getErrorMessage(error, t) {
-  const msg = error?.message || error?.detail || '';
+  const msg = typeof error === 'string'
+    ? error
+    : error?.message || error?.detail || error?.response?.detail || error?.response?.message || '';
+  const status = error?.status;
   const lower = String(msg).toLowerCase();
   if (lower.includes('insufficient balance')) return t?.('insufficientBalance') || 'Insufficient balance';
   if (lower.includes('not enough shares')) return t?.('notEnoughShares') || 'Not enough shares';
   if (lower.includes('market not found')) return t?.('marketNotFound') || 'Market not found';
   if (lower.includes('market is not open')) return t?.('marketNotOpen') || 'Market is not open';
   if (lower.includes('enter a quantity')) return t?.('enterQuantity') || 'Enter a quantity';
+  if (status === 400 || status === 409 || lower.includes('that name is taken') || lower.includes('taken') || lower.includes('already exists') || lower.includes('duplicate')) {
+    return t?.('nameTaken') || 'That name is taken';
+  }
   if (lower.includes('request failed')) return t?.('requestFailed') || 'Request failed';
   return msg || (t?.('requestFailed') || 'Request failed');
 }
@@ -142,12 +149,19 @@ async function requestJson(path, { method = 'GET', body, headers = {}, timeout =
         const data = parseJson && text ? JSON.parse(text) : text;
         if (!res.ok) {
           if (res.status === 404 && base !== bases[bases.length - 1]) continue;
-          throw new Error((data && (data.detail || data.message)) || `HTTP ${res.status}`);
+          const err = new Error((data && (data.detail || data.message)) || `HTTP ${res.status}`);
+          err.status = res.status;
+          err.detail = data?.detail || data?.message;
+          err.response = data;
+          throw err;
         }
         return data;
       } catch (error) {
-        lastError = error;
-        if (base === bases[bases.length - 1]) break;
+        if (error?.status === 404 && base !== bases[bases.length - 1]) {
+          lastError = error;
+          continue;
+        }
+        throw error;
       }
     }
   } finally { clearTimeout(id); }
@@ -423,7 +437,11 @@ function useRealtime(mode, handlerRef) {
 /* ============================ Small UI atoms ============================ */
 const Spinner = ({ className = 'w-5 h-5' }) => <Loader2 className={`animate-spin ${className}`} />;
 function Badge({ status, t }) {
-  const map = { open: 'bg-emerald-100 text-emerald-700', closed: 'bg-amber-100 text-amber-700', resolved: 'bg-slate-200 text-slate-600' };
+  const map = {
+    open: 'bg-emerald-100 dark:bg-emerald-900 text-emerald-700 dark:text-emerald-200',
+    closed: 'bg-amber-100 dark:bg-amber-900 text-amber-700 dark:text-amber-200',
+    resolved: 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300',
+  };
   const label = { open: t?.('open') || 'Open', closed: t?.('closed') || 'Closed', resolved: t?.('resolved') || 'Resolved' }[status];
   return <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${map[status]}`}>{label}</span>;
 }
@@ -439,10 +457,10 @@ function Modal({ open, onClose, children, title }) {
     <AnimatePresence>
       {open && (
         <motion.div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={onClose}>
-          <motion.div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden" initial={{ scale: 0.95, y: 10 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.95, y: 10 }} onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
-              <h3 className="font-bold text-slate-800">{title}</h3>
-              <button onClick={onClose} className="text-slate-400 hover:text-slate-600"><X className="w-5 h-5" /></button>
+          <motion.div className="bg-white dark:bg-slate-900 rounded-2xl shadow-xl w-full max-w-md overflow-hidden" initial={{ scale: 0.95, y: 10 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.95, y: 10 }} onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100 dark:border-slate-800">
+              <h3 className="font-bold text-slate-800 dark:text-slate-100">{title}</h3>
+              <button onClick={onClose} className="text-slate-400 dark:text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"><X className="w-5 h-5" /></button>
             </div>
             <div className="p-5">{children}</div>
           </motion.div>
@@ -454,9 +472,27 @@ function Modal({ open, onClose, children, title }) {
 
 /* ============================ Chart ============================ */
 function PriceChart({ market, history, t }) {
+  const [isDark, setIsDark] = useState(() => (typeof document !== 'undefined' && document.documentElement.classList.contains('dark')));
+  useEffect(() => {
+    const handler = () => setIsDark(document.documentElement.classList.contains('dark'));
+    window.addEventListener('theme-change', handler);
+    window.addEventListener('storage', handler);
+    return () => { window.removeEventListener('theme-change', handler); window.removeEventListener('storage', handler); };
+  }, []);
+
   const colorFor = (label) => {
-    if (market.type === 'binary') return label === 'Yes' ? '#10b981' : '#ef4444';
-    return LINE_COLORS[market.outcomes.findIndex((o) => o.label === label) % LINE_COLORS.length];
+    const idx = market.outcomes.findIndex((o) => o.label === label) % LINE_COLORS.length;
+    const base = market.type === 'binary' ? (label === 'Yes' ? '#10b981' : '#ef4444') : LINE_COLORS[idx];
+    if (!isDark) return base;
+    const darkMap = {
+      '#6366f1': '#8b93ff',
+      '#10b981': '#34d399',
+      '#f59e0b': '#fbbf24',
+      '#ef4444': '#fb7185',
+      '#06b6d4': '#38bdf8',
+      '#a855f7': '#c084fc',
+    };
+    return darkMap[base.toLowerCase()] || base;
   };
   const keys = market.type === 'binary'
     ? [(market.outcomes.find((o) => o.label === 'Yes') || market.outcomes[0]).label]
@@ -464,15 +500,15 @@ function PriceChart({ market, history, t }) {
   const data = (history || []).map((h) => {
     const row = { t: h.t }; market.outcomes.forEach((o, i) => { row[o.label] = +(h.values[i] * 100).toFixed(1); }); return row;
   });
-  if (!data.length) return <div className="h-72 flex items-center justify-center text-slate-400 text-sm">{t?.('noPriceHistory') || 'No price history yet'}</div>;
+  if (!data.length) return <div className="h-72 flex items-center justify-center text-slate-400 dark:text-slate-400 text-sm">{t?.('noPriceHistory') || 'No price history yet'}</div>;
   return (
     <div className="h-72 w-full">
       <ResponsiveContainer width="100%" height="100%">
         <LineChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 20 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-          <XAxis dataKey="t" tickFormatter={fmtDay} tick={{ fontSize: 11, fill: '#94a3b8' }} interval="preserveStartEnd" minTickGap={40} />
-          <YAxis domain={[0, 100]} tickFormatter={(v) => `${v}%`} tick={{ fontSize: 11, fill: '#94a3b8' }} width={50} />
-          <Tooltip formatter={(v, n) => [`${v}%`, n]} labelFormatter={fmtDay} contentStyle={{ borderRadius: 12, border: '1px solid #e2e8f0', fontSize: 12 }} />
+          <CartesianGrid strokeDasharray="3 3" stroke={isDark ? '#0b1220' : '#f1f5f9'} />
+          <XAxis dataKey="t" tickFormatter={fmtDay} tick={{ fontSize: 11, fill: isDark ? '#94a3b8' : '#94a3b8' }} interval="preserveStartEnd" minTickGap={40} />
+          <YAxis domain={[0, 100]} tickFormatter={(v) => `${v}%`} tick={{ fontSize: 11, fill: isDark ? '#94a3b8' : '#94a3b8' }} width={50} />
+          <Tooltip formatter={(v, n) => [`${v}%`, n]} labelFormatter={fmtDay} contentStyle={{ borderRadius: 12, border: `1px solid ${isDark ? '#1f2937' : '#e2e8f0'}`, fontSize: 12, backgroundColor: isDark ? '#071028' : '#fff', color: isDark ? '#cbd5e1' : undefined }} />
           {keys.map((k) => <Line key={k} type="monotone" dataKey={k} stroke={colorFor(k)} strokeWidth={2.5} dot={false} isAnimationActive={false} />)}
         </LineChart>
       </ResponsiveContainer>
@@ -485,27 +521,27 @@ function MarketCard({ market, onOpen, t }) {
   const top = [...market.outcomes].sort((a, b) => b.price - a.price).slice(0, market.type === 'binary' ? 2 : 3);
   return (
     <motion.button layout onClick={() => onOpen(market.id)} whileHover={{ y: -3 }}
-      className="group market-card text-left bg-white rounded-3xl border border-slate-200 p-5 hover:shadow-xl transition-all duration-200 flex flex-col gap-4">
+      className="group market-card text-left bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 p-5 hover:shadow-xl transition-all duration-200 flex flex-col gap-4">
       <div className="flex items-start justify-between gap-2">
-        <span className="text-xs font-medium text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full">{market.category}</span>
+        <span className="text-xs font-medium text-indigo-600 dark:text-indigo-200 bg-indigo-50 dark:bg-indigo-900 px-2 py-0.5 rounded-full">{market.category}</span>
         <Badge status={market.status} t={t} />
       </div>
-      <h3 className="font-semibold text-slate-800 leading-snug line-clamp-2">{market.question}</h3>
+      <h3 className="font-semibold text-slate-800 dark:text-slate-100 leading-snug line-clamp-2">{market.question}</h3>
       <div className="flex flex-col gap-1.5 mt-auto">
         {top.map((o) => {
           const c = market.type === 'binary' ? (o.label === 'Yes' ? '#10b981' : '#ef4444') : LINE_COLORS[market.outcomes.findIndex((x) => x.id === o.id) % LINE_COLORS.length];
           return (
             <div key={o.id} className="flex items-center gap-2 text-sm">
-              <span className="w-20 truncate text-slate-600">{o.label}</span>
-              <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
+              <span className="w-20 truncate text-slate-600 dark:text-slate-400">{o.label}</span>
+              <div className="flex-1 h-2 bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden">
                 <div className="h-full rounded-full" style={{ width: `${o.price * 100}%`, background: c }} />
               </div>
-              <span className="w-10 text-right font-semibold text-slate-700">{pct(o.price)}</span>
+              <span className="w-10 text-right font-semibold text-slate-700 dark:text-slate-300">{pct(o.price)}</span>
             </div>
           );
         })}
       </div>
-      <div className="flex items-center justify-between text-xs text-slate-400 pt-1 border-t border-slate-100">
+      <div className="flex items-center justify-between text-xs text-slate-400 dark:text-slate-400 pt-1 border-t border-slate-100 dark:border-slate-800">
         <span className="inline-flex items-center gap-1"><Activity className="w-3 h-3" /> Vol {money(market.volume)}</span>
         <span className="inline-flex items-center gap-1"><Clock className="w-3 h-3" /> {market.status === 'resolved' ? t?.('settled') || 'Settled' : fromNow(market.close_date)}</span>
       </div>
@@ -519,12 +555,12 @@ function MarketsView({ ctx, markets, loading, filters, setFilters, t }) {
       <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
         <div className="max-w-2xl">
           <p className="text-xs uppercase tracking-[0.3em] text-indigo-600 font-semibold">{t?.('marketsHeading') || 'Markets'}</p>
-          <h2 className="mt-3 text-3xl font-bold tracking-tight text-slate-900">{t?.('marketsTitle') || 'Trade event outcomes in real time'}</h2>
-          <p className="mt-2 text-sm text-slate-500">{t?.('marketsSubtitle') || 'Filter by status, category, and momentum to find the markets you want to trade.'}</p>
+          <h2 className="mt-3 text-3xl font-bold tracking-tight text-slate-900 dark:text-slate-100">{t?.('marketsTitle') || 'Trade event outcomes in real time'}</h2>
+          <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">{t?.('marketsSubtitle') || 'Filter by status, category, and momentum to find the markets you want to trade.'}</p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <div className="inline-flex items-center gap-2 rounded-full bg-slate-100 px-4 py-2 text-sm font-medium text-slate-700">
-            <span className="text-slate-900">{markets.length}</span> {t?.('marketsCount', { count: markets.length }) || `${markets.length} markets`}
+          <div className="inline-flex items-center gap-2 rounded-full bg-slate-100 dark:bg-slate-800 px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-200">
+            <span className="text-slate-900 dark:text-slate-100">{markets.length}</span> {t?.('marketsCount', { count: markets.length }) || `${markets.length} markets`}
           </div>
           <div className="inline-flex items-center gap-2 rounded-full bg-indigo-50 px-4 py-2 text-sm font-medium text-indigo-700">
             {t?.('statusLabel', { status: filters.status.charAt(0).toUpperCase() + filters.status.slice(1) }) || `${filters.status.charAt(0).toUpperCase() + filters.status.slice(1)} status`}
@@ -538,7 +574,7 @@ function MarketsView({ ctx, markets, loading, filters, setFilters, t }) {
             className="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200" />
         </div>
         <select value={filters.sort} onChange={(e) => setFilters((f) => ({ ...f, sort: e.target.value }))}
-          className="px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white">
+          className="px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-800 text-sm bg-white dark:bg-slate-900">
           <option value="trending">{t?.('sortTrending') || 'Trending'}</option>
           <option value="newest">{t?.('sortNewest') || 'Newest'}</option>
         </select>
@@ -546,12 +582,12 @@ function MarketsView({ ctx, markets, loading, filters, setFilters, t }) {
       <div className="flex flex-wrap gap-2 items-center">
         {['open', 'closed', 'resolved'].map((s) => (
           <button key={s} onClick={() => setFilters((f) => ({ ...f, status: s }))}
-            className={`h-10 px-4 rounded-full text-sm font-medium capitalize ${filters.status === s ? 'bg-slate-800 text-white' : 'bg-white border border-slate-200 text-slate-600 hover:border-slate-300 hover:text-slate-800'}`}>{t?.(s) || s}</button>
+            className={`h-10 px-4 rounded-full text-sm font-medium capitalize ${filters.status === s ? 'bg-slate-800 text-white' : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-600 hover:border-slate-300 hover:text-slate-800'}`}>{t?.(s) || s}</button>
         ))}
-        <div className="w-px h-8 bg-slate-200 mx-1" />
+        <div className="w-px h-8 bg-slate-200 dark:bg-slate-800 mx-1" />
         {['All', ...CATEGORIES].map((c) => (
           <button key={c} onClick={() => setFilters((f) => ({ ...f, category: c }))}
-            className={`h-10 px-4 rounded-full text-sm ${filters.category === c ? 'bg-indigo-100 text-indigo-700 font-medium' : 'bg-white border border-slate-200 text-slate-500 hover:border-slate-300 hover:text-slate-700'}`}>{c}</button>
+            className={`h-10 px-4 rounded-full text-sm ${filters.category === c ? 'bg-indigo-100 text-indigo-700 font-medium' : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-500 hover:border-slate-300 hover:text-slate-700'}`}>{c}</button>
         ))}
       </div>
       {loading ? (
@@ -605,25 +641,25 @@ function TradePanel({ ctx, market, t }) {
   const disabled = busy || !open || !!err || !Number(shares);
 
   return (
-    <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-3">
-      <h3 className="font-bold text-slate-800">{t?.('tradeHeading') || 'Trade'}</h3>
-      <div className="grid grid-cols-2 gap-2 p-1 bg-slate-100 rounded-xl">
+    <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-4 space-y-3">
+      <h3 className="font-bold text-slate-800 dark:text-slate-100">{t?.('tradeHeading') || 'Trade'}</h3>
+      <div className="grid grid-cols-2 gap-2 p-1 bg-slate-100 dark:bg-slate-800 rounded-xl">
         {['buy', 'sell'].map((s) => (
           <button key={s} onClick={() => setSide(s)}
-            className={`py-1.5 rounded-lg text-sm font-semibold capitalize ${side === s ? (s === 'buy' ? 'bg-emerald-500 text-white' : 'bg-rose-500 text-white') : 'text-slate-500'}`}>{t?.(s) || s}</button>
+            className={`py-1.5 rounded-lg text-sm font-semibold capitalize ${side === s ? (s === 'buy' ? 'bg-emerald-500 text-white' : 'bg-rose-500 text-white') : 'text-slate-500 dark:text-slate-300'}`}>{t?.(s) || s}</button>
         ))}
       </div>
       <div className="space-y-1.5">
         {market.outcomes.map((o) => (
           <button key={o.id} onClick={() => setOutcomeId(o.id)}
-            className={`w-full flex items-center justify-between px-3 py-2 rounded-xl border text-sm ${outcomeId === o.id ? 'border-indigo-400 bg-indigo-50' : 'border-slate-200'}`}>
-            <span className="font-medium text-slate-700 truncate">{o.label}</span>
-            <span className="font-bold text-slate-800">{pct1(o.price)}</span>
+            className={`w-full flex items-center justify-between px-3 py-2 rounded-xl border text-sm ${outcomeId === o.id ? 'border-indigo-400 bg-indigo-50 dark:bg-indigo-900' : 'border-slate-200 dark:border-slate-700'}`}>
+            <span className="font-medium text-slate-700 dark:text-slate-300 truncate">{o.label}</span>
+            <span className="font-bold text-slate-800 dark:text-slate-100">{pct1(o.price)}</span>
           </button>
         ))}
       </div>
       <div>
-        <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
+        <div className="flex items-center justify-between text-xs text-slate-400 dark:text-slate-400 mb-1">
           <span>{t?.('shares') || 'Shares'}</span>
           <button className="text-indigo-600 font-medium" onClick={() => {
             if (side === 'sell') setShares(Math.floor(held));
@@ -631,10 +667,10 @@ function TradePanel({ ctx, market, t }) {
           }}>{t?.('max') || 'Max'}</button>
         </div>
         <input type="number" min="0" value={shares} onChange={(e) => setShares(e.target.value)}
-          className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200" />
+          className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-400" />
       </div>
       {quote && !err && (
-        <div className="text-sm space-y-1 bg-slate-50 rounded-xl p-3">
+        <div className="text-sm space-y-1 bg-slate-50 dark:bg-slate-800 rounded-xl p-3">
           <Row k={t?.('priceImpact') || 'Price impact'} v={`${pct1(quote.cur_price)} → ${pct1(quote.new_price)}`} />
           <Row k={t?.('avgFill') || 'Avg fill'} v={pct1(quote.avg_price)} />
           {side === 'buy'
@@ -642,8 +678,8 @@ function TradePanel({ ctx, market, t }) {
             : <Row k={t?.('youReceive') || 'You receive'} v={<Money value={quote.proceeds} />} highlight />}
         </div>
       )}
-      {err && <div className="text-sm text-rose-600 flex items-center gap-1.5"><AlertCircle className="w-4 h-4" />{err}</div>}
-      {!open && <div className="text-sm text-amber-600 flex items-center gap-1.5"><Clock className="w-4 h-4" />{t?.('marketStatusIs', { status: t?.(market.status) || market.status }) || `Market is ${market.status}`}</div>}
+      {err && <div className="text-sm text-rose-600 dark:text-rose-400 flex items-center gap-1.5"><AlertCircle className="w-4 h-4" />{err}</div>}
+      {!open && <div className="text-sm text-amber-600 dark:text-amber-400 flex items-center gap-1.5"><Clock className="w-4 h-4" />{t?.('marketStatusIs', { status: t?.(market.status) || market.status }) || `Market is ${market.status}`}</div>}
       <button onClick={submit} disabled={disabled}
         className={`w-full py-2.5 rounded-xl font-semibold text-white flex items-center justify-center gap-2 ${disabled ? 'bg-slate-300' : side === 'buy' ? 'bg-emerald-500 hover:bg-emerald-600' : 'bg-rose-500 hover:bg-rose-600'}`}>
         {busy ? <Spinner /> : !ctx.user ? <><LogIn className="w-4 h-4" /> {t?.('signInToTrade') || 'Sign in to trade'}</> : <>{t?.(side === 'buy' ? 'buy' : 'sell') || (side === 'buy' ? 'Buy' : 'Sell')} {sel?.label}</>}
@@ -653,8 +689,8 @@ function TradePanel({ ctx, market, t }) {
 }
 const Row = ({ k, v, highlight }) => (
   <div className="flex items-center justify-between">
-    <span className="text-slate-500">{k}</span>
-    <span className={highlight ? 'font-bold text-slate-800' : 'font-medium text-slate-700'}>{v}</span>
+    <span className="text-slate-500 dark:text-slate-400">{k}</span>
+    <span className={highlight ? 'font-bold text-slate-800 dark:text-slate-100' : 'font-medium text-slate-700 dark:text-slate-300'}>{v}</span>
   </div>
 );
 
@@ -677,9 +713,9 @@ function ResolvePanel({ ctx, market, t }) {
     finally { setBusy(false); }
   };
   return (
-    <div className="bg-white rounded-2xl border border-amber-200 p-4 space-y-2">
-      <h3 className="font-bold text-slate-800 flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-amber-500" /> {t?.('resolveHeading') || 'Resolve (admin / creator)'}</h3>
-      <p className="text-xs text-slate-500">{t?.('resolveHint') || 'Pick the winning outcome. Each winning share pays 1.00 credit.'}</p>
+    <div className="bg-white dark:bg-slate-900 rounded-2xl border border-amber-200 dark:border-amber-700 p-4 space-y-2">
+      <h3 className="font-bold text-slate-800 dark:text-slate-100 flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-amber-500" /> {t?.('resolveHeading') || 'Resolve (admin / creator)'}</h3>
+      <p className="text-xs text-slate-500 dark:text-slate-400">{t?.('resolveHint') || 'Pick the winning outcome. Each winning share pays 1.00 credit.'}</p>
       <div className="flex flex-wrap gap-2">
         {market.outcomes.map((o) => (
           <button key={o.id} disabled={busy} onClick={() => resolve(o.id)}
@@ -702,10 +738,10 @@ function MarketDetailView({ ctx, detail, onBack, t }) {
   };
   return (
     <div className="space-y-4">
-      <button onClick={onBack} className="text-sm text-slate-500 hover:text-slate-700 flex items-center gap-1"><ChevronRight className="w-4 h-4 rotate-180" /> {t?.('backToMarkets') || 'Back to markets'}</button>
+      <button onClick={onBack} className="text-sm text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 flex items-center gap-1"><ChevronRight className="w-4 h-4 rotate-180" /> {t?.('backToMarkets') || 'Back to markets'}</button>
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="lg:col-span-2 space-y-4">
-          <div className="bg-white rounded-2xl border border-slate-200 p-5">
+          <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-5">
             <div className="flex items-center gap-2 mb-2">
               <span className="text-xs font-medium text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full">{detail.category}</span>
               <Badge status={detail.status} t={t} />
@@ -719,17 +755,17 @@ function MarketDetailView({ ctx, detail, onBack, t }) {
               </div>
             )}
           </div>
-          <div className="bg-white rounded-2xl border border-slate-200 p-5">
+          <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-5">
             <h3 className="font-bold text-slate-800 mb-2 flex items-center gap-2"><BarChart3 className="w-4 h-4 text-indigo-500" /> {t?.('priceHistory') || 'Price history'}</h3>
             <PriceChart market={detail} history={detail.history} t={t} />
           </div>
           {detail.resolution_criteria && (
-            <div className="bg-white rounded-2xl border border-slate-200 p-5">
+            <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-5">
               <h3 className="font-bold text-slate-800 mb-1">{t?.('resolutionCriteriaHeading') || 'Resolution criteria'}</h3>
               <p className="text-sm text-slate-500">{detail.resolution_criteria}</p>
             </div>
           )}
-          <div className="bg-white rounded-2xl border border-slate-200 p-5">
+          <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-5">
             <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2"><MessageSquare className="w-4 h-4 text-indigo-500" /> {t?.('discussion') || 'Discussion'}</h3>
             <div className="flex gap-2 mb-4">
               <input value={comment} onChange={(e) => setComment(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addComment()}
@@ -753,7 +789,7 @@ function MarketDetailView({ ctx, detail, onBack, t }) {
         <div className="space-y-4">
           <TradePanel ctx={ctx} market={detail} t={t} />
           <ResolvePanel ctx={ctx} market={detail} t={t} />
-          <div className="bg-white rounded-2xl border border-slate-200 p-4">
+          <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-4">
             <h3 className="font-bold text-slate-800 mb-3 flex items-center gap-2"><Activity className="w-4 h-4 text-indigo-500" /> {t?.('recentTrades') || 'Recent trades'}</h3>
             <div className="space-y-2">
               {(detail.recent_trades || []).length === 0 && <p className="text-sm text-slate-400">{t?.('noTrades') || 'No trades yet.'}</p>}
@@ -814,7 +850,7 @@ function PortfolioView({ ctx, t }) {
       </div>
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
         {stats.map((s) => (
-          <div key={s.label} className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm">
+          <div key={s.label} className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-4 shadow-sm">
             <div className="flex items-center gap-2 text-xs text-slate-400"><s.icon className="w-3.5 h-3.5" />{s.label}</div>
             <div className={`text-xl font-bold mt-3 ${s.pnl ? (s.value >= 0 ? 'text-emerald-600' : 'text-rose-600') : 'text-slate-900'}`}>
               {s.pnl && s.value >= 0 ? '+' : ''}{money(s.value)}
@@ -822,8 +858,8 @@ function PortfolioView({ ctx, t }) {
           </div>
         ))}
       </div>
-      <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
-        <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between gap-3">
+      <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 overflow-hidden">
+        <div className="px-5 py-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between gap-3">
           <div>
             <h3 className="font-bold text-slate-800">{t?.('openPositions') || 'Open positions'}</h3>
             <p className="text-sm text-slate-500">{t?.('openPositionsSubtitle') || 'Tap to open the market and manage your exposure.'}</p>
@@ -850,8 +886,8 @@ function PortfolioView({ ctx, t }) {
         )}
       </div>
       {trades.length > 0 && (
-        <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
-          <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between gap-3">
+        <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 overflow-hidden">
+          <div className="px-5 py-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between gap-3">
             <div>
               <h3 className="font-bold text-slate-800">{t?.('recentActivity') || 'Recent activity'}</h3>
               <p className="text-sm text-slate-500">{t?.('recentActivitySubtitle') || 'Latest trades from your account.'}</p>
@@ -883,8 +919,8 @@ function LeaderboardView({ ctx, t }) {
   useEffect(() => { let a = true; ctx.ds.leaderboard().then((r) => a && setRows(r)).catch(() => a && setRows([])); return () => { a = false; }; }, [ctx.portfolioVersion]);
   if (!rows) return <div className="flex justify-center py-20 text-slate-400"><Spinner className="w-8 h-8" /></div>;
   return (
-    <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden max-w-4xl mx-auto">
-      <div className="px-5 py-4 border-b border-slate-100">
+    <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 overflow-hidden max-w-4xl mx-auto">
+      <div className="px-5 py-4 border-b border-slate-100 dark:border-slate-800">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div className="space-y-1">
             <div className="inline-flex items-center gap-2 text-sm text-slate-500">
@@ -947,10 +983,10 @@ function CreateMarketModal({ ctx, open, onClose, t }) {
         <textarea value={f.description} onChange={(e) => setF({ ...f, description: e.target.value })} placeholder={t('descriptionPlaceholder')} rows={2}
           className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200" />
         <div className="grid grid-cols-2 gap-2">
-          <select value={f.category} onChange={(e) => setF({ ...f, category: e.target.value })} className="px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white">
+          <select value={f.category} onChange={(e) => setF({ ...f, category: e.target.value })} className="px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-800 text-sm bg-white dark:bg-slate-900">
             {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
           </select>
-          <select value={f.type} onChange={(e) => setF({ ...f, type: e.target.value })} className="px-3 py-2 rounded-xl border border-slate-200 text-sm bg-white">
+          <select value={f.type} onChange={(e) => setF({ ...f, type: e.target.value })} className="px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-800 text-sm bg-white dark:bg-slate-900">
             <option value="binary">Binary (Yes/No)</option>
             <option value="categorical">Categorical</option>
           </select>
@@ -991,6 +1027,16 @@ function AuthModal({ ctx, open, onClose, t }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState(ctx.dsMode === 'demo' ? 'demo1234' : '');
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setMode('login');
+    setName(ctx.dsMode === 'demo' ? 'You' : '');
+    setEmail('');
+    setPassword(ctx.dsMode === 'demo' ? 'demo1234' : '');
+    setBusy(false);
+  }, [open, ctx.dsMode]);
+
   const submit = async () => {
     setBusy(true);
     try { await ctx.doAuth(mode, { name, email, password }); onClose(); }
@@ -1031,6 +1077,14 @@ export default function App() {
   const [authOpen, setAuthOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [toasts, setToasts] = useState([]);
+  const [theme, setTheme] = useState(() => {
+    try { return document.documentElement.classList.contains('dark') ? 'dark' : 'light'; } catch { return 'light'; }
+  });
+  useEffect(() => {
+    const handler = () => setTheme(document.documentElement.classList.contains('dark') ? 'dark' : 'light');
+    window.addEventListener('storage', handler);
+    return () => window.removeEventListener('storage', handler);
+  }, []);
 
   useEffect(() => {
     if (typeof window !== 'undefined') window.localStorage.setItem('forecast-language', language);
@@ -1135,7 +1189,13 @@ export default function App() {
     setUser(me); toast('success', t?.('welcome', { name: me.name }) || `Welcome, ${me.name}`);
   }, [mode, toast]);
 
-  const logout = () => { setUser(mode === 'demo' ? demoState.you : null); setToken(mode === 'demo' ? 'demo' : null); setPortfolio(null); };
+  const logout = () => {
+    setUser(mode === 'demo' ? demoState.you : null);
+    setToken(mode === 'demo' ? 'demo' : null);
+    setPortfolio(null);
+    setView({ name: 'markets' });
+    setAuthOpen(true);
+  };
 
   const ctx = {
     ds, dsMode: mode, user, portfolio, portfolioVersion, openMarket, toast, refreshPortfolio, applyPrices, doAuth,
@@ -1144,19 +1204,19 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900" style={{ fontFamily: 'ui-sans-serif, system-ui, sans-serif' }}>
+    <div className="min-h-screen bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-slate-100" style={{ fontFamily: 'ui-sans-serif, system-ui, sans-serif' }}>
       {/* connection banner */}
       {mode === 'demo' && (
         <div className="bg-amber-500 text-white text-sm px-4 py-3 flex items-center justify-center gap-3 flex-wrap">
           <WifiOff className="w-4 h-4" /> {t('demoBanner')}
-          <span className="rounded-full bg-white/15 px-2 py-0.5 text-[0.75rem] font-semibold">
+          <span className="rounded-full bg-white/15 dark:bg-white/10 px-2 py-0.5 text-[0.75rem] font-semibold">
             {backendAccessMode}
           </span>
           <button onClick={() => { setMode('connecting'); http('/config', { timeout: 2500 }).then(() => setMode('live')).catch(() => setMode('demo')); }} className="underline font-semibold">{t('retry')}</button>
         </div>
       )}
 
-      <header className="sticky top-0 z-30 bg-white/95 backdrop-blur border-b border-slate-200 header-shadow">
+      <header className="sticky top-0 z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur border-b border-slate-200 dark:border-slate-800 header-shadow">
         <div className="max-w-7xl mx-auto px-4 py-3 flex flex-wrap items-center gap-3 justify-between min-w-0">
           <div className="flex flex-wrap items-center gap-2 min-w-0">
             <button onClick={() => setView({ name: 'markets' })} className="flex items-center gap-2 font-bold text-slate-800 min-w-0">
@@ -1171,7 +1231,7 @@ export default function App() {
             {!import.meta.env.PROD && (
               <span className="inline-flex max-w-full items-center gap-1 rounded-full bg-slate-100 px-3 py-1 text-[0.65rem] text-slate-600 break-words whitespace-normal" title={API_BASE}>
                 API host: {API_BASE.replace(/^https?:\/\//, '')}
-                <span className={`ml-2 rounded-full px-2 py-0.5 text-[0.65rem] font-semibold ${usingDevProxy ? 'bg-indigo-50 text-indigo-600' : 'bg-slate-200 text-slate-600'}`}>
+                <span className={`ml-2 rounded-full px-2 py-0.5 text-[0.65rem] font-semibold ${usingDevProxy ? 'bg-indigo-50 dark:bg-indigo-900 text-indigo-600 dark:text-indigo-200' : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300'}`}>
                   {backendAccessMode}
                 </span>
               </span>
@@ -1192,6 +1252,18 @@ export default function App() {
                 {SUPPORTED_LANGUAGES.map((code) => <option key={code} value={code}>{LANGUAGE_LABELS[code]}</option>)}
               </select>
             </label>
+            <button onClick={() => {
+              try {
+                const isDark = document.documentElement.classList.toggle('dark');
+                document.documentElement.style.colorScheme = isDark ? 'dark' : 'light';
+                localStorage.setItem('theme', isDark ? 'dark' : 'light');
+                setTheme(isDark ? 'dark' : 'light');
+                // notify other components in this window about the theme change
+                try { window.dispatchEvent(new Event('theme-change')); } catch (e) { /* ignore */ }
+              } catch (e) { /* ignore */ }
+            }} title={theme === 'dark' ? 'Switch to light' : 'Switch to dark'} className="p-2 rounded-full bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700">
+              {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+            </button>
             <button onClick={() => setCreateOpen(true)} className="px-4 py-2 rounded-2xl bg-indigo-500 text-white text-sm font-medium flex items-center gap-2 hover:bg-indigo-600 shadow-sm small-nav-button"><Plus className="w-4 h-4" /><span className="hidden sm:inline">{t('new')}</span></button>
             {user ? (
               <div className="flex items-center gap-2 min-w-0">
@@ -1204,7 +1276,7 @@ export default function App() {
             )}
           </div>
         </div>
-        <nav className="sm:hidden flex border-t border-slate-100 bg-white overflow-x-auto">
+        <nav className="sm:hidden flex border-t border-slate-100 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-x-auto">
           {[['markets', t('markets'), TrendingUp], ['portfolio', t('portfolio'), Wallet], ['leaderboard', t('leaderboard'), Trophy]].map(([k, label, Icon]) => (
             <button key={k} onClick={() => setView({ name: k })} className={`flex-1 min-w-[84px] py-2.5 text-xs font-semibold inline-flex flex-col items-center justify-center gap-1 ${view.name === k ? 'text-indigo-600 border-b-2 border-indigo-500 bg-indigo-50' : 'text-slate-500 hover:text-slate-700'}`}>
               <Icon className="w-4 h-4" />
