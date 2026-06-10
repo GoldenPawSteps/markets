@@ -107,13 +107,19 @@ const qs = (o) => Object.entries(o).filter(([, v]) => v !== undefined && v !== n
   .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
 
 function getErrorMessage(error, t) {
-  const msg = error?.message || error?.detail || '';
+  const msg = typeof error === 'string'
+    ? error
+    : error?.message || error?.detail || error?.response?.detail || error?.response?.message || '';
+  const status = error?.status;
   const lower = String(msg).toLowerCase();
   if (lower.includes('insufficient balance')) return t?.('insufficientBalance') || 'Insufficient balance';
   if (lower.includes('not enough shares')) return t?.('notEnoughShares') || 'Not enough shares';
   if (lower.includes('market not found')) return t?.('marketNotFound') || 'Market not found';
   if (lower.includes('market is not open')) return t?.('marketNotOpen') || 'Market is not open';
   if (lower.includes('enter a quantity')) return t?.('enterQuantity') || 'Enter a quantity';
+  if (status === 400 || status === 409 || lower.includes('that name is taken') || lower.includes('taken') || lower.includes('already exists') || lower.includes('duplicate')) {
+    return t?.('nameTaken') || 'That name is taken';
+  }
   if (lower.includes('request failed')) return t?.('requestFailed') || 'Request failed';
   return msg || (t?.('requestFailed') || 'Request failed');
 }
@@ -143,12 +149,19 @@ async function requestJson(path, { method = 'GET', body, headers = {}, timeout =
         const data = parseJson && text ? JSON.parse(text) : text;
         if (!res.ok) {
           if (res.status === 404 && base !== bases[bases.length - 1]) continue;
-          throw new Error((data && (data.detail || data.message)) || `HTTP ${res.status}`);
+          const err = new Error((data && (data.detail || data.message)) || `HTTP ${res.status}`);
+          err.status = res.status;
+          err.detail = data?.detail || data?.message;
+          err.response = data;
+          throw err;
         }
         return data;
       } catch (error) {
-        lastError = error;
-        if (base === bases[bases.length - 1]) break;
+        if (error?.status === 404 && base !== bases[bases.length - 1]) {
+          lastError = error;
+          continue;
+        }
+        throw error;
       }
     }
   } finally { clearTimeout(id); }
@@ -1014,6 +1027,16 @@ function AuthModal({ ctx, open, onClose, t }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState(ctx.dsMode === 'demo' ? 'demo1234' : '');
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setMode('login');
+    setName(ctx.dsMode === 'demo' ? 'You' : '');
+    setEmail('');
+    setPassword(ctx.dsMode === 'demo' ? 'demo1234' : '');
+    setBusy(false);
+  }, [open, ctx.dsMode]);
+
   const submit = async () => {
     setBusy(true);
     try { await ctx.doAuth(mode, { name, email, password }); onClose(); }
@@ -1166,7 +1189,13 @@ export default function App() {
     setUser(me); toast('success', t?.('welcome', { name: me.name }) || `Welcome, ${me.name}`);
   }, [mode, toast]);
 
-  const logout = () => { setUser(mode === 'demo' ? demoState.you : null); setToken(mode === 'demo' ? 'demo' : null); setPortfolio(null); };
+  const logout = () => {
+    setUser(mode === 'demo' ? demoState.you : null);
+    setToken(mode === 'demo' ? 'demo' : null);
+    setPortfolio(null);
+    setView({ name: 'markets' });
+    setAuthOpen(true);
+  };
 
   const ctx = {
     ds, dsMode: mode, user, portfolio, portfolioVersion, openMarket, toast, refreshPortfolio, applyPrices, doAuth,

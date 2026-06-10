@@ -77,6 +77,7 @@ const translations = {
     enterQuantity: 'Enter a quantity',
     insufficientBalance: 'Insufficient balance',
     notEnoughShares: 'Not enough shares',
+    nameTaken: 'That name is taken',
     requestFailed: 'Request failed',
     backToMarkets: 'Back to markets',
     priceHistory: 'Price history',
