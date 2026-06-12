@@ -1051,9 +1051,10 @@ function AuthModal({ ctx, open, onClose, t }) {
         <button onClick={submit} disabled={busy} className="w-full py-2.5 rounded-xl font-semibold text-white bg-indigo-500 hover:bg-indigo-600 flex items-center justify-center gap-2">
           {busy ? <Spinner /> : mode === 'login' ? t('login') : t('register')}
         </button>
-        <button onClick={() => setMode(mode === 'login' ? 'register' : 'login')} className="w-full text-sm text-slate-500">
-          {mode === 'login' ? t('registerSwitch') : t('loginSwitch')}
-        </button>
+        <button onClick={() => setMode(mode === 'login' ? 'register' : 'login')}
+  className="w-full text-sm font-medium text-indigo-600 hover:text-indigo-700 hover:underline dark:text-indigo-400 dark:hover:text-indigo-300">
+  {mode === 'login' ? t('registerSwitch') : t('loginSwitch')}
+</button>
       </div>
     </Modal>
   );
