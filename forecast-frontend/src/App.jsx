@@ -939,7 +939,11 @@ function LeaderboardView({ ctx, t }) {
                 <Avatar user={r} />
                 <div className="min-w-0">
                   <div className="font-semibold text-slate-800 truncate">{r.name}</div>
-                  <div className="text-xs text-slate-500">{r.is_bot ? (t?.('botTrader') || 'bot trader') : (t?.('humanTrader') || 'human trader')}</div>
+                  {ctx.dsMode === 'demo' && (
+  <div className="text-xs text-slate-500">
+    {r.is_bot ? (t?.('botTrader') || 'bot trader') : (t?.('humanTrader') || 'human trader')}
+  </div>
+)}
                 </div>
               </div>
               <div className="text-right">
